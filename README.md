@@ -15,3 +15,6 @@ To run the procedure, you'll need to generate 2d pose files from best estimates 
 - `loopposes.csv`: Estimated rel.poses from [EPnP](https://github.com/cvlab-epfl/EPnP), given depths from each depth values and local point cloud map. (2D form)
 - `odomposes.csv`: Estimated poses from odometry, and projected into 2D.
 
+### Pretrained Dual encoder
+
+``https://drive.google.com/file/d/1c5tRjpAmgoBEXkndTXTj4gixBWOZqYlF/view?usp=sharing``
