@@ -2,6 +2,7 @@ import numpy as np
 from PIL import Image
 from torch.utils.data import Dataset
 import torch.utils.data as data
+from torchvision import datasets, transforms
 import pandas as pd
 from os.path import join
 from sklearn.neighbors import NearestNeighbors
@@ -12,17 +13,6 @@ import sys
 import itertools
 from tqdm import tqdm
 import signal
-
-def handler(signum, frame):
-    tqdm.write("skipping iteration because of dataloader freezing")
-    return None
-
-default_splits = {
-    # 'train': ["train"],
-    'test': ["test"]
-    # 'test': ["test_night"]
-}
-
 
 def input_transform():
     return transforms.Compose([
@@ -70,20 +60,11 @@ class ImagesFromList(Dataset):
 
 
 class VisibilityDataset(Dataset):
-    def __init__(self, root_dir, splits='', nNeg=5, transform=None, mode='train',
+    def __init__(self, root_dir, querySeq, dbSeq, nNeg=5, transform=None,
                  posDistThr=10., negDistThr=25., cached_queries=1000, cached_negatives=1000,
                  positive_sampling=True, bs=24, threads=8, margin=0.1):
 
         # initializing
-        assert mode in ('train', 'val', 'test')
-
-        if splits in default_splits:
-            self.splits = default_splits[splits]
-        elif splits == '':
-            self.splits = default_splits[mode]
-        else:
-            self.splits = splits.split(',')
-
         self.qIdx = []
         self.qImages = []
         self.pIdx = []
@@ -102,19 +83,12 @@ class VisibilityDataset(Dataset):
 
         # flags
         self.cache = None
-        self.mode = mode
 
         # other
         self.transform = transform
-        # load data
-        city = self.splits[0]
-        print("=====> {}".format(city))
-        if mode != "test":
-            qPath = join(root_dir, city)
-            dbPath = join(root_dir, city)
-        else:
-            qPath = join(root_dir, city, 'query')
-            dbPath = join(root_dir, city, 'database')
+
+        qPath = join(root_dir, querySeq)
+        dbPath = join(root_dir, dbSeq)
 
         # when GPS / UTM is available
         # load query data
@@ -135,32 +109,18 @@ class VisibilityDataset(Dataset):
         dbSeqKeys_d = self.array_as_path(join(dbPath, 'disp_npy'), dbData_d, ext)
         dbSeqKeys_r = self.array_as_path(join(dbPath, 'range_npy'), dbData_r, ext)
 
-        if self.mode == 'test': # this is to adjust average distances.
-            qdownsample_d = np.arange(len(qSeqKeys_d)) % 30 == 31
-            qdownsample_r = np.arange(len(qSeqKeys_r)) % 10 == 0
-            dbdownsample_d = np.arange(len(dbSeqKeys_d)) % 60 == 0
-            dbdownsample_r = np.arange(len(dbSeqKeys_r)) % 20 == 21
-            qData_d = qData_d[qdownsample_d, :]
-            qData_r = qData_r[qdownsample_r, :]
-            dbData_d = dbData_d[dbdownsample_d, :]
-            dbData_r = dbData_r[dbdownsample_r, :]
-            qSeqKeys_d = [qSeqKeys_d[i] for i in np.where(qdownsample_d)[0]]
-            qSeqKeys_r = [qSeqKeys_r[i] for i in np.where(qdownsample_r)[0]]
-            dbSeqKeys_d = [dbSeqKeys_d[i] for i in np.where(dbdownsample_d)[0]]
-            dbSeqKeys_r = [dbSeqKeys_r[i] for i in np.where(dbdownsample_r)[0]]
-        else: # as camera is 30Hz and LiDAR is 10Hz, downsample images.
-            qdownsample_d = np.arange(len(qSeqKeys_d)) % 3 == 0
-            qdownsample_r = np.arange(len(qSeqKeys_r)) % 1 == 0
-            dbdownsample_d = np.arange(len(dbSeqKeys_d)) % 3 == 0
-            dbdownsample_r = np.arange(len(dbSeqKeys_r)) % 1 == 0
-            qData_d = qData_d[qdownsample_d, :]
-            qData_r = qData_r[qdownsample_r, :]
-            dbData_d = dbData_d[dbdownsample_d, :]
-            dbData_r = dbData_r[dbdownsample_r, :]
-            qSeqKeys_d = [qSeqKeys_d[i] for i in np.where(qdownsample_d)[0]]
-            qSeqKeys_r = [qSeqKeys_r[i] for i in np.where(qdownsample_r)[0]]
-            dbSeqKeys_d = [dbSeqKeys_d[i] for i in np.where(dbdownsample_d)[0]]
-            dbSeqKeys_r = [dbSeqKeys_r[i] for i in np.where(dbdownsample_r)[0]]
+        qdownsample_d = np.arange(len(qSeqKeys_d)) % 30 == 31
+        qdownsample_r = np.arange(len(qSeqKeys_r)) % 10 == 0
+        dbdownsample_d = np.arange(len(dbSeqKeys_d)) % 60 == 0
+        dbdownsample_r = np.arange(len(dbSeqKeys_r)) % 20 == 21
+        qData_d = qData_d[qdownsample_d, :]
+        qData_r = qData_r[qdownsample_r, :]
+        dbData_d = dbData_d[dbdownsample_d, :]
+        dbData_r = dbData_r[dbdownsample_r, :]
+        qSeqKeys_d = [qSeqKeys_d[i] for i in np.where(qdownsample_d)[0]]
+        qSeqKeys_r = [qSeqKeys_r[i] for i in np.where(qdownsample_r)[0]]
+        dbSeqKeys_d = [dbSeqKeys_d[i] for i in np.where(dbdownsample_d)[0]]
+        dbSeqKeys_r = [dbSeqKeys_r[i] for i in np.where(dbdownsample_r)[0]]
 
         # prepare all the mixed-up variables
         self.qImages.extend(qSeqKeys_d)
@@ -181,7 +141,7 @@ class VisibilityDataset(Dataset):
         utmDb = np.array(dbData[:, :2], dtype=float)
         utmDistQ = np.sum(np.linalg.norm(utmQ[:-1] - utmQ[1:], axis=1)) / (len(self.qImages)-1)
         utmDistDb = np.sum(np.linalg.norm(utmDb[:-1] - utmDb[1:], axis=1)) / (len(self.dbImages)-1)
-        print("mode: {}, ".format(self.mode) + "Avg. distance Q: %.2f" % utmDistQ + ", Avg. distance Db: %.2f" % utmDistDb)
+        print("mode: test + Avg. distance Q: %.2f" % utmDistQ + ", Avg. distance Db: %.2f" % utmDistDb)
         self.utmQ = utmQ
         self.utmDb = utmDb
 
@@ -190,18 +150,8 @@ class VisibilityDataset(Dataset):
         neigh.fit(utmDb)
         pos_distances, pos_indices = neigh.radius_neighbors(utmQ, self.posDistThr)
 
-        if self.mode == 'train':
-            nD, nI = neigh.radius_neighbors(utmQ, self.negDistThr)
-
         for q_seq_idx in range(len(qSeqKeys)):
-            if self.mode == 'train':
-                if len(pos_indices[q_seq_idx]) > 1: # do not self-choose if there's more than one truth
-                    pos_inds = np.setdiff1d(pos_indices[q_seq_idx], q_seq_idx)
-                else: pos_inds = pos_indices[q_seq_idx]
-                n_uniq_frame_idxs = np.unique(nI[q_seq_idx])
-                self.nonNegIdx.append(n_uniq_frame_idxs)
-            else:
-                pos_inds = pos_indices[q_seq_idx]
+            pos_inds = pos_indices[q_seq_idx]
             pos_ind_range = pos_inds[pos_inds >= self.numDB_d]
             pos_ind_disp = pos_inds[pos_inds < self.numDB_d]
             p_uniq_frame_idxs = np.zeros((0, ))

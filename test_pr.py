@@ -11,12 +11,12 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 import numpy as np
 
-from lclc.vivid import *
+from dataset.vivid import *
 from lclc.models import dual_encoder
 import faiss
 
 os.environ["CUDA_DEVICE_ORDER"]= "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"]= "0, 1"
+os.environ["CUDA_VISIBLE_DEVICES"]= "0"
 
 def compute_recall(gt, predictions, numQ, n_values, recall_str=''):
     correct_at_n = np.zeros(len(n_values))
@@ -41,10 +41,10 @@ def test(eval_set, model, device, opt, config):
     eval_set_queries = ImagesFromList(eval_set.qImages, transform=input_transform())
     eval_set_dbs = ImagesFromList(eval_set.dbImages, transform=input_transform())
     test_q_loader = DataLoader(dataset=eval_set_queries, num_workers=1,
-                                  batch_size=int(config['batchsize']),
+                                  batch_size=int(config['test']['batchsize']),
                                   shuffle=False, pin_memory=(not opt.nocuda))
     test_db_loader = DataLoader(dataset=eval_set_dbs, num_workers=1,
-                                  batch_size=int(config['batchsize']),
+                                  batch_size=int(config['test']['batchsize']),
                                   shuffle=False, pin_memory=(not opt.nocuda))
 
     model.eval()
@@ -110,8 +110,12 @@ def main():
     parser = argparse.ArgumentParser(description='LC2')
     parser.add_argument('--config_path', type=str, default='lclc/test.ini',
                         help='File name (with extension) to an ini file that stores most of the configuration data for patch-netvlad')
-    parser.add_argument('--dataset_root_dir', type=str, default='../vivid',
+    parser.add_argument('--dataset_root_dir', type=str, default='/media/jhlee/4TBSSD/vivid_projects/data',
                         help='If the files in dataset_file_path are relative, use dataset_root_dir as prefix.')
+    parser.add_argument('--query_seq', type=str, default='campus_day1',
+                        help='The sequence to use as query')
+    parser.add_argument('--db_seq', type=str, default='campus_day2',
+                        help='The sequence to use as database')
 
     opt = parser.parse_args()
     print(opt)
@@ -121,16 +125,17 @@ def main():
     config = configparser.ConfigParser()
     config.read(configfile)
 
-    device = torch.device("cuda" if cuda else "cpu")
+    device = torch.device("cuda")
 
     encoder = dual_encoder()
     encoder_dim = encoder.enc_dim
 
-    dataset = VisibilityDataset(opt.dataset_root_dir, mode='test', transform=input_transform(),
-                           bs=int(config['cachebatchsize']), threads=1,
+    dataset = VisibilityDataset(opt.dataset_root_dir, opt.query_seq, opt.db_seq, transform=input_transform(),
+                           bs=int(config['test']['cachebatchsize']), threads=1,
                            margin=0.1, posDistThr=25)
 
-    resume_ckpt = 'pretrained_models/checkpoint.pth.tar'
+    resume_ckpt = 'pretrained_models/dual_encoder.pth.tar'
+    print(isfile(resume_ckpt))
 
     if not isfile(resume_ckpt):
         resume_ckpt = os.path.join(resume_ckpt)
@@ -148,7 +153,7 @@ def main():
         model.add_module('encoder', encoder)
         model.add_module('pool', net_vlad)
 
-        if int(config['nGPU']) > 1 and torch.cuda.device_count() > 1:
+        if int(config['test']['nGPU']) > 1 and torch.cuda.device_count() > 1:
             model.encoder = nn.DataParallel(model.encoder)
             model.pool = nn.DataParallel(model.pool)
 

@@ -20,8 +20,8 @@ import numpy as np
 class dual_encoder(nn.Module):
     def __init__(self):
         super().__init__()
-        encoder_d = models.vgg16(pretrained=True)
-        encoder_r = models.vgg16(pretrained=True)
+        encoder_d = models.vgg16(weights=None)
+        encoder_r = models.vgg16(weights=None)
         layers_d = list(encoder_d.features.children())[:-2]
         layers_r = list(encoder_r.features.children())[:-2]
         # only train conv5_1, conv5_2, and conv5_3 (leave rest same as Imagenet trained weights)
