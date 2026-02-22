@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "lc2"
+version = "2.0.0"
+description = "LC2: LiDAR-Camera Cross-Modal Place Recognition"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Junho Lee"},
+]
+dependencies = [
+    "torch>=2.0",
+    "torchvision>=0.15",
+    "numpy>=1.24",
+    "faiss-cpu>=1.7",
+    "scikit-learn>=1.3",
+    "pyyaml>=6.0",
+    "Pillow>=10.0",
+    "tqdm>=4.65",
+    "scipy>=1.11",
+]
+
+[project.optional-dependencies]
+da3 = ["awesome-depth-anything-3"]
+dust3r = ["dust3r"]
+gtsam = ["gtsam"]
+all = ["awesome-depth-anything-3", "dust3r", "gtsam"]
+
+[tool.setuptools.packages.find]
+include = ["lc2*"]
