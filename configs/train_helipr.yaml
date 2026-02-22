@@ -1,0 +1,68 @@
+dataset:
+  name: helipr
+  root: /media/jhlee/EVO4TB/HeLiPR
+  sequences: ["DCC04"]
+  ouster_cache_dir: cache/range/helipr/Ouster
+  velodyne_cache_dir: cache/range/helipr/Velodyne
+  pos_threshold: 25.0
+
+model:
+  num_clusters: 16
+  encoder_dim: 512
+
+train:
+  sequences: ["DCC04"]
+  ouster_subsample: 2
+  velodyne_subsample: 2
+  batch_size: 4
+  cache_batch_size: 64
+  patience: 15
+
+  # Phase 1: skip (use pretrained encoder)
+  phase1_epochs: 0
+
+  # Phase 2: NetVLAD + Triplet Loss
+  phase2_frozen_epochs: 5
+  phase2_frozen_lr: 0.001
+  phase2_epochs: 40
+  phase2_lr: 0.0001
+
+  # Triplet mining
+  pos_dist_thr: 10.0
+  neg_dist_thr: 25.0
+  n_neg: 10
+  margin: 0.05
+
+  # Optimizer
+  optimizer: sgd
+  momentum: 0.9
+  weight_decay: 0.001
+  lr_step: 10
+  lr_gamma: 0.5
+
+val:
+  sequences: ["DCC04"]
+  batch_size: 64
+  recall_ks: [1, 5, 10]
+  top_k: 10
+
+depth:
+  estimator: da3                 # da3 | dinov3 | dust3r
+  variant: da3-large             # estimator-specific
+
+lidar:
+  sensor: ouster_os2_128         # from registry
+  infill: none                   # none | nearest_neighbor | bilateral | adaptive
+  augmentation:
+    beam_drop: 0.1
+    point_jitter: 0.02
+    range_noise: 0.01
+    occlusion_patches: 3
+
+input:
+  resize: [480, 640]
+  use_disparity: false
+  depth_augmentation:
+    scale_pct: 20
+    noise: 0.02
+    holes: 0.05

@@ -1,0 +1,27 @@
+dataset:
+  name: kitti360
+  root: /media/jhlee/QVO4TB/data/kitti360/KITTI-360
+  sequences: ["0010"]
+  pos_threshold: 25.0
+
+model:
+  num_clusters: 16
+  encoder_dim: 512
+
+depth:
+  estimator: da3
+  variant: da3-large
+
+lidar:
+  sensor: velodyne_hdl64
+
+input:
+  resize: [480, 640]
+  camera_hfov_deg: 90.0
+  use_disparity: true
+
+eval:
+  top_k: 25
+  recall_ks: [1, 5, 10]
+  pos_thresholds: [5.0, 10.0, 25.0]
+  batch_size: 64

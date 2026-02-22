@@ -1,0 +1,80 @@
+dataset:
+  name: vivid
+  root: /media/jhlee/EVO4TB/vivid_projects/data
+  sequences: [campus_day1, campus_day2]
+  depth_cache_dir: cache/depth/vivid
+  pos_threshold: 25.0          # meters (evaluation GT)
+
+model:
+  num_clusters: 16
+  encoder_dim: 512
+
+train:
+  sequences: [campus_day1, campus_day2]   # training sequences (both modalities)
+  range_subsample: 10          # use every 10th range frame
+  depth_subsample: 10          # use every 10th depth frame
+  batch_size: 4
+  cache_batch_size: 64         # batch size for descriptor extraction
+  patience: 10
+
+  # Phase 1: GeM + Modified Contrastive Loss with psi (Section III.B.3)
+  phase1_epochs: 20            # contrastive pre-training with GeM
+  phase1_lr: 0.001             # LR for Phase 1
+  contrastive_tau: 1.0         # margin tau for contrastive loss (Eq. 2)
+  n_crops: 8                   # 8 FoV-masked overlapping range crops (Section III.C.1)
+  crop_fov_deg: 90.0           # each crop covers 90 degrees
+  scale_augment_pct: 20.0      # depth scale augmentation +-20% (Section III.C.2)
+
+  # Phase 2: NetVLAD + Triplet Loss (Section III.B.4)
+  phase2_frozen_epochs: 5      # freeze encoder, train only NetVLAD centroids+conv
+  phase2_frozen_lr: 0.001      # higher LR for fast VLAD cluster adaptation
+  phase2_epochs: 25            # unfreeze conv5, joint training
+  phase2_lr: 0.0001            # lower LR for fine-tuning
+
+  # Triplet mining (Phase 2)
+  pos_dist_thr: 10.0           # meters: positives within this distance
+  neg_dist_thr: 25.0           # meters: negatives beyond this distance
+  n_neg: 5                     # hard negatives per triplet
+  margin: 0.1                  # triplet margin m=0.1 (paper Section IV.A)
+
+  # Optimizer
+  optimizer: sgd
+  momentum: 0.9
+  weight_decay: 0.001
+  lr_step: 5                   # halve LR every 5 epochs
+  lr_gamma: 0.5
+
+val:
+  sequences: [campus_day2]     # validation sequence
+  batch_size: 64
+  recall_ks: [1, 5, 10]
+  top_k: 10
+
+eval:
+  batch_size: 64
+  top_k: 25
+  recall_ks: [1, 5, 10, 15, 20]
+  num_workers: 4
+
+depth:
+  estimator: da3                 # da3 | dinov3 | dust3r
+  variant: da3-large             # estimator-specific
+
+lidar:
+  sensor: ouster_os1_64          # from registry
+  infill: none                   # none | nearest_neighbor | bilateral | adaptive
+  augmentation:
+    beam_drop: 0.1
+    point_jitter: 0.02
+    range_noise: 0.01
+    occlusion_patches: 3
+
+input:
+  resize: [480, 640]             # common resolution for depth (406x504) and range
+  use_disparity: true            # convert depth to disparity (paper Section III.A.2)
+  # camera_hfov_deg: N/A for VIVID — range_npy are pre-processed (256,640), NOT 360° panoramic
+  # FoV crop only applies to raw panoramic range images (e.g., KITTI-360)
+  depth_augmentation:
+    scale_pct: 20
+    noise: 0.02
+    holes: 0.05

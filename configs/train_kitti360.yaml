@@ -1,0 +1,75 @@
+dataset:
+  name: kitti360
+  root: /media/jhlee/QVO4TB/data/kitti360/KITTI-360
+  sequences: ["0010"]
+  depth_cache_dir: cache/depth/kitti360
+  range_cache_dir: cache/range/kitti360
+  pos_threshold: 25.0
+
+model:
+  num_clusters: 16
+  encoder_dim: 512
+
+train:
+  sequences: ["0010"]
+  range_subsample: 10
+  depth_subsample: 10
+  batch_size: 4
+  cache_batch_size: 64
+  patience: 10
+
+  # Phase 1: skip (use pretrained encoder)
+  phase1_epochs: 0
+
+  # Phase 2: NetVLAD + Triplet Loss
+  phase2_frozen_epochs: 5
+  phase2_frozen_lr: 0.001
+  phase2_epochs: 25
+  phase2_lr: 0.0001
+
+  # Triplet mining
+  pos_dist_thr: 10.0
+  neg_dist_thr: 25.0
+  n_neg: 5
+  margin: 0.1
+
+  # Optimizer
+  optimizer: sgd
+  momentum: 0.9
+  weight_decay: 0.001
+  lr_step: 5
+  lr_gamma: 0.5
+
+val:
+  sequences: ["0010"]
+  batch_size: 64
+  recall_ks: [1, 5, 10]
+  top_k: 10
+
+eval:
+  batch_size: 64
+  top_k: 25
+  recall_ks: [1, 5, 10, 15, 20]
+  num_workers: 4
+
+depth:
+  estimator: da3                 # da3 | dinov3 | dust3r
+  variant: da3-large             # estimator-specific
+
+lidar:
+  sensor: velodyne_hdl64         # from registry
+  infill: none                   # none | nearest_neighbor | bilateral | adaptive
+  augmentation:
+    beam_drop: 0.1
+    point_jitter: 0.02
+    range_noise: 0.01
+    occlusion_patches: 3
+
+input:
+  resize: [480, 640]
+  camera_hfov_deg: 90.0
+  use_disparity: true
+  depth_augmentation:
+    scale_pct: 20
+    noise: 0.02
+    holes: 0.05

@@ -1,0 +1,26 @@
+dataset:
+  name: helipr
+  root: /media/jhlee/EVO4TB/HeLiPR
+  sequences: ["DCC04"]
+  pos_threshold: 25.0
+
+model:
+  num_clusters: 16
+  encoder_dim: 512
+
+depth:
+  estimator: da3
+  variant: da3-large
+
+lidar:
+  sensor: ouster_os2_128
+
+input:
+  resize: [480, 640]
+  use_disparity: false
+
+eval:
+  top_k: 25
+  recall_ks: [1, 5, 10]
+  pos_thresholds: [5.0, 10.0, 25.0]
+  batch_size: 64
