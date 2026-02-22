@@ -94,6 +94,13 @@ def get_infill_fn(name: str) -> InfillFn:
     return _INFILL_REGISTRY[name]
 
 
+def list_infill_methods() -> list:
+    """Return sorted list of registered infill method names."""
+    if not _INFILL_REGISTRY:
+        _build_registry()
+    return sorted(_INFILL_REGISTRY.keys())
+
+
 # ──────────────────────────────────────────────────────────────
 # Nearest-neighbor infill (EDT-based)
 # ──────────────────────────────────────────────────────────────
