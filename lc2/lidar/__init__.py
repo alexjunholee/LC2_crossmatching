@@ -52,4 +52,6 @@ __all__ = [
     "get_infill_fn",
     "nearest_neighbor_infill",
     "adaptive_infill",
+    # augmentation
+    "RangeAugmentation",
 ]
