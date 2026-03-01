@@ -147,6 +147,42 @@ def depth_to_normalized_disparity(depth: np.ndarray, min_depth: float = 0.1) -> 
     return normalize_disparity(disp)
 
 
+def range_to_normalized_disparity(
+    range_img: np.ndarray, min_range: float = 0.01
+) -> np.ndarray:
+    """Convert range image to disparity and normalize to [0, 1].
+
+    Following the LC2 paper, range images are converted to disparity form
+    (1/range) so that closer objects are numerically dominant, matching
+    the depth disparity representation.
+
+    Empty pixels (value 0 = no LiDAR return) remain 0.
+
+    Args:
+        range_img: Range image ``(H, W)`` with values in [0, max_range].
+            0 means no return.
+        min_range: Threshold below which pixels are treated as empty.
+
+    Returns:
+        Normalized disparity in [0, 1], float32. Empty pixels stay 0.
+    """
+    valid = range_img > min_range
+    if not valid.any():
+        return np.zeros_like(range_img, dtype=np.float32)
+
+    out = np.zeros_like(range_img, dtype=np.float32)
+    out[valid] = 1.0 / range_img[valid]
+
+    r_min = out[valid].min()
+    r_max = out[valid].max()
+    if r_max - r_min < 1e-8:
+        out[valid] = 0.5
+    else:
+        out[valid] = (out[valid] - r_min) / (r_max - r_min)
+
+    return out
+
+
 def scale_augment_disparity(
     disparity: np.ndarray, max_scale_pct: float = 20.0
 ) -> np.ndarray:

@@ -1,0 +1,20 @@
+dataset:
+  name: kitti360
+  root: /media/jhlee/QVO4TB/data/kitti360/KITTI-360
+  sequences: ["0010"]
+  query_modality: range       # LiDAR range images
+  db_modality: depth           # Camera depth maps (DA3)
+  depth_cache_dir: cache/depth/kitti360
+  range_cache_dir: cache/range/kitti360
+  pos_threshold: 10.0          # meters (stricter than default 25m)
+
+model:
+  num_clusters: 16
+  encoder_dim: 512
+  checkpoint: pretrained/dual_encoder.pth.tar
+
+eval:
+  batch_size: 4
+  top_k: 25
+  recall_ks: [1, 5, 10, 15, 20]
+  num_workers: 4

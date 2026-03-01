@@ -150,8 +150,8 @@ def load_pcd(path: str) -> np.ndarray:
 
             for i in range(count):
                 name = field if count == 1 else f"{field}_{i}"
-                # Handle duplicate field names (PCD may have unnamed padding fields)
-                if name == "_":
+                # Handle duplicate/padding field names (Ouster PCD has multiple '_' fields)
+                if name.startswith("_"):
                     name = f"_pad_{len(dtype_list)}"
                 dtype_list.append((name, np_type))
 

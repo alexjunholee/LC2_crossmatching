@@ -18,8 +18,13 @@ train:
   cache_batch_size: 64
   patience: 10
 
-  # Phase 1: skip (use pretrained encoder)
-  phase1_epochs: 0
+  # Phase 1: GeM + Contrastive Loss
+  phase1_epochs: 20
+  phase1_lr: 0.001
+  contrastive_tau: 1.0
+  n_crops: 1
+  crop_fov_deg: 90.0
+  scale_augment_pct: 20.0
 
   # Phase 2: NetVLAD + Triplet Loss
   phase2_frozen_epochs: 5
@@ -66,9 +71,8 @@ lidar:
     occlusion_patches: 3
 
 input:
-  resize: [480, 640]
+  resize: [480, 640]             # v3_aug used [480,640] and achieved 51.16% R@1
   camera_hfov_deg: 90.0
-  use_disparity: true
   depth_augmentation:
     scale_pct: 20
     noise: 0.02

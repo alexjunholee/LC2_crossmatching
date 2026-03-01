@@ -44,8 +44,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from lc2.model import LC2Model
 from lc2.losses import LC2ContrastiveLoss
 from lc2.data.transforms import (
-    get_transform, normalize_depth, depth_to_normalized_disparity,
-    squeeze_depth, crop_range_to_camera_fov,
+    get_transform, depth_to_normalized_disparity,
+    range_to_normalized_disparity, normalize_disparity, squeeze_depth, crop_range_to_camera_fov,
     DepthAugmentation,
 )
 from lc2.lidar.augmentation import RangeAugmentation
@@ -80,7 +80,6 @@ def init_netvlad_from_data(
     device: torch.device,
     num_clusters: int = 16,
     batch_size: int = 64,
-    use_disparity: bool = True,
     camera_hfov_deg: float = 90.0,
 ) -> None:
     """Initialize NetVLAD centroids via K-means on encoder features."""
@@ -107,11 +106,9 @@ def init_netvlad_from_data(
                 if pool.is_range[idx]:
                     if camera_hfov_deg < 360.0:
                         data = crop_range_to_camera_fov(data, camera_hfov_deg=camera_hfov_deg)
+                    data = normalize_disparity(data)
                 else:
-                    if use_disparity:
-                        data = depth_to_normalized_disparity(data)
-                    else:
-                        data = normalize_depth(data)
+                    data = depth_to_normalized_disparity(data)
 
                 img = transform(data)
                 images.append(img)
@@ -170,7 +167,6 @@ def validate(
     ks = val_cfg.get("recall_ks", [1, 5, 10])
     top_k = val_cfg.get("top_k", max(ks))
 
-    use_disparity = input_cfg.get("use_disparity", True)
     camera_hfov_deg = input_cfg.get("camera_hfov_deg", None)
 
     resize_cfg = input_cfg.get("resize", None)
@@ -196,7 +192,6 @@ def validate(
                     modality="depth",
                     depth_cache_dir=dataset_cfg.get("depth_cache_dir"),
                     subsample=10, input_size=input_size,
-                    use_disparity=use_disparity,
                 )
             elif dataset_name == "helipr":
                 ds_q = HeLiPRLC2Dataset(
@@ -215,6 +210,7 @@ def validate(
                 ds_q = VIVIDLC2Dataset(
                     root=dataset_cfg["root"], sequence=seq,
                     modality="range", subsample=10,
+                    range_cache_dir=dataset_cfg.get("range_cache_dir"),
                     input_size=input_size,
                     camera_hfov_deg=camera_hfov_deg,
                 )
@@ -223,7 +219,6 @@ def validate(
                     modality="depth",
                     depth_cache_dir=dataset_cfg.get("depth_cache_dir"),
                     subsample=10, input_size=input_size,
-                    use_disparity=use_disparity,
                 )
         except FileNotFoundError:
             continue
@@ -238,12 +233,14 @@ def validate(
         query_desc_list.append(np.concatenate(range_descs, axis=0))
         query_pos_list.append(ds_q.get_positions())
 
-        # Depth database
+        # Depth/secondary database
+        # HeLiPR: both sensors are range images → route both through encoder_r
+        db_is_range = (dataset_name == "helipr")
         depth_descs = []
         loader = DataLoader(ds_d, batch_size=batch_size, shuffle=False, num_workers=2)
         for batch in loader:
             imgs = batch["image"].to(device)
-            d = model.forward_single(imgs, is_range=False)
+            d = model.forward_single(imgs, is_range=db_is_range)
             depth_descs.append(d.cpu().numpy())
         db_desc_list.append(np.concatenate(depth_descs, axis=0))
         db_pos_list.append(ds_d.get_positions())
@@ -329,7 +326,6 @@ def train_phase2_epoch(
     batch_size = train_cfg.get("batch_size", 4)
     n_neg = train_cfg.get("n_neg", 5)
     margin = train_cfg.get("margin", 0.1)
-    use_disparity = input_cfg.get("use_disparity", True)
     camera_hfov_deg = input_cfg.get("camera_hfov_deg", None)
     effective_fov = camera_hfov_deg if camera_hfov_deg is not None else 360.0
 
@@ -340,7 +336,6 @@ def train_phase2_epoch(
         model, transform, device,
         batch_size=train_cfg.get("cache_batch_size", 64),
         camera_hfov_deg=effective_fov,
-        use_disparity=use_disparity,
     )
     triplets = miner.mine(descriptors, margin=margin)
     t1 = time.time()
@@ -353,7 +348,6 @@ def train_phase2_epoch(
     triplet_dataset = LC2TripletDataset(
         triplets, miner.pool, transform,
         camera_hfov_deg=effective_fov,
-        use_disparity=use_disparity,
         range_augmentation=range_augmentation,
         depth_augmentation=depth_augmentation,
     )
@@ -445,6 +439,8 @@ def main():
                         help="Resume encoder weights from checkpoint")
     parser.add_argument("--skip_phase1", action="store_true",
                         help="Skip Phase 1 contrastive pre-training")
+    parser.add_argument("--gem_phase2", action="store_true",
+                        help="Use GeM pooling for Phase 2 (skip NetVLAD)")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--output_dir", type=str, default="checkpoints")
     args = parser.parse_args()
@@ -468,7 +464,6 @@ def main():
     transform = get_transform(input_size)
 
     # Config
-    use_disparity = input_cfg.get("use_disparity", True)
     camera_hfov_deg = input_cfg.get("camera_hfov_deg", None)  # None = no FoV crop
 
     # Build augmentation pipelines from config
@@ -507,8 +502,24 @@ def main():
 
     # ─── Model ───────────────────────────────────────────────────
     if args.resume:
-        print(f"Loading encoder weights from: {args.resume}")
-        model = LC2Model.from_checkpoint(args.resume, device=device, pooling="gem")
+        resume_path = Path(args.resume)
+        print(f"Loading encoder weights from: {resume_path}")
+
+        # Detect checkpoint format: our training format has 'phase' key
+        ckpt_probe = torch.load(str(resume_path), map_location="cpu", weights_only=False)
+        if isinstance(ckpt_probe, dict) and "phase" in ckpt_probe:
+            # Our own training checkpoint — load state_dict directly
+            print(f"  Detected training checkpoint (phase={ckpt_probe['phase']}, "
+                  f"epoch={ckpt_probe['epoch']}, best={ckpt_probe.get('best_score', 0):.4f})")
+            model = LC2Model(
+                num_clusters=num_clusters, encoder_dim=encoder_dim,
+                vladv2=False, pooling="gem",
+            )
+            model.load_state_dict(ckpt_probe["state_dict"], strict=False)
+            model = model.to(device)
+        else:
+            # Original LC2 pretrained checkpoint
+            model = LC2Model.from_checkpoint(args.resume, device=device, pooling="gem")
     else:
         model = LC2Model(
             num_clusters=num_clusters, encoder_dim=encoder_dim,
@@ -518,7 +529,7 @@ def main():
 
     print(f"Model: {num_clusters} clusters, {encoder_dim}-dim")
     print(f"Total params: {sum(p.numel() for p in model.parameters()):,}")
-    print(f"Preprocessing: use_disparity={use_disparity}, camera_hfov_deg={camera_hfov_deg}")
+    print(f"Preprocessing: always disparity, camera_hfov_deg={camera_hfov_deg}")
 
     best_recall = 0.0
     total_epoch = 0
@@ -551,18 +562,19 @@ def main():
                 depth_subsample=train_cfg.get("depth_subsample", 10),
                 n_crops=n_crops,
                 crop_fov_deg=crop_fov_deg,
-                camera_hfov_deg=camera_hfov_deg,
+                camera_hfov_deg=camera_hfov_deg if camera_hfov_deg else 90.0,
             )
         else:
             phase1_pool = build_vivid_phase1_pool(
                 root=dataset_cfg["root"],
                 sequences=train_cfg.get("sequences", dataset_cfg["sequences"]),
                 depth_cache_dir=dataset_cfg.get("depth_cache_dir"),
+                range_cache_dir=dataset_cfg.get("range_cache_dir"),
                 range_subsample=train_cfg.get("range_subsample", 10),
                 depth_subsample=train_cfg.get("depth_subsample", 10),
                 n_crops=n_crops,
                 crop_fov_deg=crop_fov_deg,
-                camera_hfov_deg=camera_hfov_deg,
+                camera_hfov_deg=camera_hfov_deg if camera_hfov_deg else 90.0,
             )
         n_range_p1 = sum(1 for r in phase1_pool.is_range if r)
         n_depth_p1 = len(phase1_pool) - n_range_p1
@@ -570,10 +582,12 @@ def main():
               f"({n_range_p1} range crops, {n_depth_p1} depth)")
 
         # Mine contrastive pairs with ψ
+        # Default to 90° for ψ computation if camera_hfov_deg not set
+        # (e.g. when range images are already in camera view)
         pair_miner = ContrastivePairMiner(
             pool=phase1_pool,
             max_range_m=50.0,
-            camera_fov_deg=camera_hfov_deg,
+            camera_fov_deg=camera_hfov_deg if camera_hfov_deg else 90.0,
         )
 
         # Phase 1 dataset with scale augmentation
@@ -645,20 +659,27 @@ def main():
         print("\nSkipping Phase 1 (--skip_phase1 flag).")
 
     # ╔══════════════════════════════════════════════════════════════╗
-    # ║  PHASE 2: NetVLAD + Triplet Loss (Section III.B.4)          ║
+    # ║  PHASE 2: Triplet Loss Fine-tuning (Section III.B.4)        ║
     # ╚══════════════════════════════════════════════════════════════╝
 
-    # Switch to NetVLAD
-    model.set_pooling("netvlad")
+    use_gem_phase2 = args.gem_phase2
 
+    if not use_gem_phase2:
+        # Switch to NetVLAD (original paper pipeline)
+        model.set_pooling("netvlad")
+    else:
+        # Keep GeM pooling (avoids NetVLAD mode collapse on range/depth data)
+        model.set_pooling("gem")
+
+    pooling_name = "GeM" if use_gem_phase2 else "NetVLAD"
     print(f"\n{'='*60}")
-    print(f"  PHASE 2: NetVLAD + Triplet Loss")
+    print(f"  PHASE 2: {pooling_name} + Triplet Loss")
     print(f"  Frozen epochs: {phase2_frozen_epochs}, Frozen LR: {phase2_frozen_lr}")
     print(f"  Fine-tune epochs: {phase2_epochs}, Fine-tune LR: {phase2_lr}")
     print(f"  Loss: TripletMarginLoss, margin={margin}")
     fov_str = f"camera FoV crop ({camera_hfov_deg}°)" if camera_hfov_deg else "no FoV crop"
     print(f"  Range: {fov_str}")
-    print(f"  Depth: {'disparity' if use_disparity else 'normalize_depth'}")
+    print(f"  Depth: disparity (always)")
     print(f"{'='*60}\n")
 
     # Build Phase 2 pool (no FoV crops — cropping done at load time)
@@ -687,6 +708,7 @@ def main():
             root=dataset_cfg["root"],
             sequences=train_cfg.get("sequences", dataset_cfg["sequences"]),
             depth_cache_dir=dataset_cfg.get("depth_cache_dir"),
+            range_cache_dir=dataset_cfg.get("range_cache_dir"),
             range_subsample=train_cfg.get("range_subsample", 10),
             depth_subsample=train_cfg.get("depth_subsample", 10),
         )
@@ -694,29 +716,15 @@ def main():
     n_depth = len(pool) - n_range
     print(f"  Pool: {len(pool)} entries ({n_range} range, {n_depth} depth)")
 
-    # Initialize NetVLAD centroids
-    freeze_encoder(model)
-    if args.resume:
-        netvlad_has_weights = model.netvlad.centroids.abs().sum().item() > 0
-        if netvlad_has_weights:
-            print(f"  Using pretrained NetVLAD centroids (skipping K-means).")
-            print(f"  centroids norm: {model.netvlad.centroids.norm():.4f}")
-        else:
-            print("  NetVLAD centroids are empty — running K-means init.")
-            init_netvlad_from_data(
-                model, pool, transform, device,
-                num_clusters=num_clusters,
-                batch_size=train_cfg.get("cache_batch_size", 64),
-                use_disparity=use_disparity,
-                camera_hfov_deg=camera_hfov_deg if camera_hfov_deg else 360.0,
-            )
-            model = model.to(device)
-    else:
+    if not use_gem_phase2:
+        # Initialize NetVLAD centroids via K-means on current data.
+        # Always re-init even when resuming — pretrained centroids from a different
+        # dataset/resolution won't match the current feature distribution.
+        freeze_encoder(model)
         init_netvlad_from_data(
             model, pool, transform, device,
             num_clusters=num_clusters,
             batch_size=train_cfg.get("cache_batch_size", 64),
-            use_disparity=use_disparity,
             camera_hfov_deg=camera_hfov_deg if camera_hfov_deg else 360.0,
         )
         model = model.to(device)
@@ -738,7 +746,8 @@ def main():
     epochs_no_improve = 0
 
     # ─── Phase 2a: Frozen encoder, train NetVLAD only ────────────
-    if phase2_frozen_epochs > 0:
+    # (Skip Phase 2a when using GeM — no new pooling layer to warm up)
+    if phase2_frozen_epochs > 0 and not use_gem_phase2:
         print(f"\n  Phase 2a: Frozen encoder, NetVLAD-only ({phase2_frozen_epochs} epochs)")
         freeze_encoder(model)
         print(f"  Trainable params (encoder frozen): {count_trainable(model):,}")

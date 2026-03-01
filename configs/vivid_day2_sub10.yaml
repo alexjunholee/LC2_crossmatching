@@ -1,26 +1,24 @@
 dataset:
   name: vivid
   root: /media/jhlee/EVO4TB/vivid_projects/data
-  sequences: [campus_day1]
+  sequences: [campus_day2]
+  query_modality: range
+  db_modality: depth
   depth_cache_dir: cache/depth/vivid
   pos_threshold: 25.0
 
 model:
   num_clusters: 16
   encoder_dim: 512
-
-depth:
-  estimator: da3
-  variant: da3-large
-
-lidar:
-  sensor: ouster_os1_64
+  checkpoint: pretrained/dual_encoder.pth.tar
 
 input:
   resize: [480, 640]
 
 eval:
-  top_k: 25
-  recall_ks: [1, 5, 10]
-  pos_thresholds: [5.0, 10.0, 25.0]
   batch_size: 64
+  top_k: 25
+  recall_ks: [1, 5, 10, 15, 20]
+  pos_thresholds: [5.0, 10.0, 25.0]
+  subsample: 10
+  num_workers: 4

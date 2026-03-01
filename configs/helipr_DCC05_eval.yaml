@@ -1,0 +1,24 @@
+dataset:
+  name: helipr
+  root: /media/jhlee/EVO4TB/HeLiPR
+  sequences: ["DCC05"]
+  query_modality: ouster
+  db_modality: velodyne
+  ouster_cache_dir: cache/range/helipr/Ouster
+  velodyne_cache_dir: cache/range/helipr/Velodyne
+  pos_threshold: 25.0
+
+model:
+  num_clusters: 16
+  encoder_dim: 512
+  checkpoint: checkpoints/helipr_v1/best.pth.tar
+
+input:
+  resize: [128, 1024]
+
+eval:
+  batch_size: 64
+  top_k: 25
+  recall_ks: [1, 5, 10, 15, 20]
+  pos_thresholds: [5.0, 10.0, 25.0]
+  num_workers: 4

@@ -23,8 +23,8 @@ from tqdm import tqdm
 from lc2.data.transforms import (
     get_transform,
     squeeze_depth,
-    normalize_depth,
     depth_to_normalized_disparity,
+    range_to_normalized_disparity,
     scale_augment_disparity,
     depth_to_disparity,
     normalize_disparity,
@@ -190,8 +190,9 @@ class LC2ContrastivePairDataset(Dataset):
         crop_idx = self.pool.crop_idx[idx]
 
         if is_range:
-            # Range image: apply crop (Phase 1 augmentation), leave raw
-            if crop_idx >= 0:
+            # Range image: apply crop (Phase 1 augmentation)
+            # Skip crop for n_crops=1 (camera-view range, not panoramic)
+            if crop_idx >= 0 and self.n_crops > 1:
                 data = crop_range_panoramic(
                     data, crop_idx,
                     n_crops=self.n_crops,
@@ -200,6 +201,7 @@ class LC2ContrastivePairDataset(Dataset):
             # Apply range augmentation (after crop, before transform)
             if self.range_augmentation is not None:
                 data = self.range_augmentation(data)
+            data = normalize_disparity(data)
         else:
             # Depth: convert to disparity (paper Section III.A.2)
             # + optional scale augmentation (paper Section III.C.2)
@@ -242,10 +244,13 @@ class ImagePool:
         - ``is_range``: bool indicating modality
     """
 
-    def __init__(self) -> None:
+    def __init__(self, all_range_preprocess: bool = False,
+                 forward_all_as_range: bool = False) -> None:
         self.paths: List[Path] = []
         self.positions: List[np.ndarray] = []
         self.is_range: List[bool] = []
+        self.all_range_preprocess = all_range_preprocess
+        self.forward_all_as_range = forward_all_as_range
 
     def add(self, path: Path, position: np.ndarray, is_range: bool) -> None:
         self.paths.append(path)
@@ -303,12 +308,11 @@ class TripletMiner:
         device: torch.device,
         batch_size: int = 64,
         camera_hfov_deg: float = 90.0,
-        use_disparity: bool = True,
     ) -> np.ndarray:
         """Extract descriptors for all images in the pool.
 
         Phase 2: range images are cropped to camera FoV before encoding.
-        Depth images are converted to disparity (paper Section III.A.2).
+        Both modalities are always converted to disparity.
         """
         model.eval()
         all_desc = []
@@ -324,22 +328,25 @@ class TripletMiner:
                     data = squeeze_depth(data)
 
                 if self.pool.is_range[idx]:
-                    # Range: crop to camera FoV (paper Section III.B.4)
                     if camera_hfov_deg < 360.0:
                         data = crop_range_to_camera_fov(data, camera_hfov_deg=camera_hfov_deg)
+                    data = normalize_disparity(data)
+                elif self.pool.all_range_preprocess:
+                    # HeLiPR: both modalities are range images
+                    data = normalize_disparity(data)
                 else:
-                    # Depth: disparity or min-max normalize
-                    if use_disparity:
-                        data = depth_to_normalized_disparity(data)
-                    else:
-                        data = normalize_depth(data)
+                    data = depth_to_normalized_disparity(data)
 
                 img = transform(data)
                 images.append(img)
                 is_range_flags.append(self.pool.is_range[idx])
 
             images_t = torch.stack(images).to(device)
-            is_range_t = torch.tensor(is_range_flags, device=device)
+            # HeLiPR: both sensors are range → route all through encoder_r
+            if self.pool.forward_all_as_range:
+                is_range_t = torch.ones(len(is_range_flags), dtype=torch.bool, device=device)
+            else:
+                is_range_t = torch.tensor(is_range_flags, device=device)
             desc = model(images_t, is_range_t)
             all_desc.append(desc.cpu().numpy())
 
@@ -405,7 +412,6 @@ class LC2TripletDataset(Dataset):
         pool: ImagePool,
         transform,
         camera_hfov_deg: float = 90.0,
-        use_disparity: bool = True,
         range_augmentation=None,
         depth_augmentation=None,
     ) -> None:
@@ -413,7 +419,6 @@ class LC2TripletDataset(Dataset):
         self.pool = pool
         self.transform = transform
         self.camera_hfov_deg = camera_hfov_deg
-        self.use_disparity = use_disparity
         self.range_augmentation = range_augmentation
         self.depth_augmentation = depth_augmentation
 
@@ -435,16 +440,14 @@ class LC2TripletDataset(Dataset):
                 # Range: crop to camera FoV (paper Section III.B.4)
                 if self.camera_hfov_deg < 360.0:
                     data = crop_range_to_camera_fov(data, camera_hfov_deg=self.camera_hfov_deg)
-                # Apply range augmentation (after FoV crop, before transform)
                 if self.range_augmentation is not None:
                     data = self.range_augmentation(data)
+                data = normalize_disparity(data)
+            elif self.pool.all_range_preprocess:
+                # HeLiPR: both modalities are range images
+                data = normalize_disparity(data)
             else:
-                # Depth: disparity or min-max normalize
-                if self.use_disparity:
-                    data = depth_to_normalized_disparity(data)
-                else:
-                    data = normalize_depth(data)
-                # Apply depth augmentation (after normalization, before transform)
+                data = depth_to_normalized_disparity(data)
                 if self.depth_augmentation is not None:
                     data = self.depth_augmentation(data)
 
@@ -452,7 +455,12 @@ class LC2TripletDataset(Dataset):
             images.append(img)
             is_range.append(self.pool.is_range[i])
 
-        return torch.stack(images), torch.tensor(is_range)
+        # HeLiPR: both sensors are range → route all through encoder_r
+        if self.pool.forward_all_as_range:
+            is_range_t = torch.ones(len(is_range), dtype=torch.bool)
+        else:
+            is_range_t = torch.tensor(is_range)
+        return torch.stack(images), is_range_t
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -566,6 +574,7 @@ def build_vivid_phase1_pool(
     root: str,
     sequences: List[str],
     depth_cache_dir: Optional[str] = None,
+    range_cache_dir: Optional[str] = None,
     range_subsample: int = 10,
     depth_subsample: int = 10,
     n_crops: int = 8,
@@ -597,6 +606,7 @@ def build_vivid_phase1_pool(
         try:
             ds_r = VIVIDLC2Dataset(
                 root=root, sequence=seq, modality="range",
+                range_cache_dir=range_cache_dir,
                 subsample=range_subsample,
             )
             positions = ds_r.get_positions()
@@ -655,10 +665,11 @@ def build_helipr_pool(
 
     Ouster is treated as "range" (is_range=True) and Velodyne as "depth"
     (is_range=False) for cross-modal triplet mining.
+    Both are range images so use normalize_disparity for both.
     """
     from lc2.data.helipr import HeLiPRLC2Dataset
 
-    pool = ImagePool()
+    pool = ImagePool(all_range_preprocess=True, forward_all_as_range=True)
 
     if ouster_cache_dir:
         try:
@@ -691,6 +702,7 @@ def build_vivid_pool(
     root: str,
     sequences: List[str],
     depth_cache_dir: Optional[str] = None,
+    range_cache_dir: Optional[str] = None,
     range_subsample: int = 10,
     depth_subsample: int = 10,
 ) -> ImagePool:
@@ -707,6 +719,7 @@ def build_vivid_pool(
         try:
             ds_r = VIVIDLC2Dataset(
                 root=root, sequence=seq, modality="range",
+                range_cache_dir=range_cache_dir,
                 subsample=range_subsample,
             )
             for i in range(len(ds_r)):

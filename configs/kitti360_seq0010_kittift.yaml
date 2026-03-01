@@ -2,6 +2,8 @@ dataset:
   name: kitti360
   root: /media/jhlee/QVO4TB/data/kitti360/KITTI-360
   sequences: ["0010"]
+  query_modality: range
+  db_modality: depth
   depth_cache_dir: cache/depth/kitti360
   range_cache_dir: cache/range/kitti360
   pos_threshold: 25.0
@@ -9,20 +11,15 @@ dataset:
 model:
   num_clusters: 16
   encoder_dim: 512
-
-depth:
-  estimator: da3
-  variant: da3-large
-
-lidar:
-  sensor: velodyne_hdl64
+  checkpoint: checkpoints/kitti360_v2/best.pth.tar
 
 input:
   resize: [480, 640]
   camera_hfov_deg: 90.0
 
 eval:
-  top_k: 25
-  recall_ks: [1, 5, 10]
-  pos_thresholds: [5.0, 10.0, 25.0]
   batch_size: 64
+  top_k: 25
+  recall_ks: [1, 5, 10, 15, 20]
+  pos_thresholds: [5.0, 10.0, 25.0]
+  num_workers: 4

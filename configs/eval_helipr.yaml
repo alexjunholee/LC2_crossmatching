@@ -16,8 +16,7 @@ lidar:
   sensor: ouster_os2_128
 
 input:
-  resize: [480, 640]
-  use_disparity: false
+  resize: [128, 1024]
 
 eval:
   top_k: 25

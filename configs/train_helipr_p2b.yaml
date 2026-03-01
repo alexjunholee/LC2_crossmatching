@@ -18,12 +18,14 @@ train:
   cache_batch_size: 64
   patience: 15
 
-  # Phase 1: skip (use pretrained encoder)
+  # Phase 1: skip
   phase1_epochs: 0
 
-  # Phase 2: NetVLAD + Triplet Loss
-  phase2_frozen_epochs: 5
+  # Phase 2a: skip (already done)
+  phase2_frozen_epochs: 0
   phase2_frozen_lr: 0.001
+
+  # Phase 2b: Unfreeze conv5
   phase2_epochs: 40
   phase2_lr: 0.0001
 
@@ -46,22 +48,5 @@ val:
   recall_ks: [1, 5, 10]
   top_k: 10
 
-depth:
-  estimator: da3                 # da3 | dinov3 | dust3r
-  variant: da3-large             # estimator-specific
-
-lidar:
-  sensor: ouster_os2_128         # from registry
-  infill: none                   # none | nearest_neighbor | bilateral | adaptive
-  augmentation:
-    beam_drop: 0.1
-    point_jitter: 0.02
-    range_noise: 0.01
-    occlusion_patches: 3
-
 input:
-  resize: [128, 1024]            # Ouster 128×1024→128×1024 (no change!), Velodyne 32×1024→128×1024 (4x vert)
-  depth_augmentation:
-    scale_pct: 20
-    noise: 0.02
-    holes: 0.05
+  resize: [128, 1024]
