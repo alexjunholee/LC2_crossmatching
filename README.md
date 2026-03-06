@@ -451,15 +451,14 @@ LC2_crossmatching/
 If you use this code in your research, please cite:
 
 ```bibtex
-@article{lee2023lc2,
-  title={(LC)$^2$: LiDAR-Camera Loop Constraints For Cross-Modal Place Recognition},
-  author={Lee, Alex Junho and Cho, Younggun and Seo, Young-Sik and Kim, Ayoung},
+@article{lee20232,
+  title={$\^{}$\{$2$\}$ $: LiDAR-camera loop constraints for cross-modal place recognition},
+  author={Lee, Alex Junho and Song, Seungwon and Lim, Hyungtae and Lee, Woojoo and Myung, Hyun},
   journal={IEEE Robotics and Automation Letters},
-  year={2023},
   volume={8},
-  number={2},
-  pages={1072--1079},
-  doi={10.1109/LRA.2023.3234803},
+  number={6},
+  pages={3589--3596},
+  year={2023},
   publisher={IEEE}
 }
 ```
