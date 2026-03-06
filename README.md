@@ -452,7 +452,7 @@ If you use this code in your research, please cite:
 
 ```bibtex
 @article{lee20232,
-  title={$\^{}$\{$2$\}$ $: LiDAR-camera loop constraints for cross-modal place recognition},
+  title={${(LC)}^{2}$: LiDAR-camera loop constraints for cross-modal place recognition},
   author={Lee, Alex Junho and Song, Seungwon and Lim, Hyungtae and Lee, Woojoo and Myung, Hyun},
   journal={IEEE Robotics and Automation Letters},
   volume={8},
