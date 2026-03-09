@@ -5,36 +5,42 @@ and computing standard VPR metrics (Recall@K, precision-recall curves).
 """
 
 import numpy as np
-import faiss
+try:
+    import faiss
+except (ImportError, AttributeError):
+    faiss = None
 from typing import Dict, List, Optional, Set, Tuple
 
 
-def build_index(descriptors: np.ndarray) -> faiss.IndexFlatL2:
+def build_index(descriptors: np.ndarray):
     """Build a FAISS L2 (Euclidean) flat index from descriptor matrix.
 
     Args:
         descriptors: Database descriptors of shape ``(N, D)``, float32.
 
     Returns:
-        A FAISS IndexFlatL2 populated with the given descriptors.
+        A FAISS IndexFlatL2 or a plain numpy array fallback.
     """
     descriptors = np.ascontiguousarray(descriptors, dtype=np.float32)
-    dim = descriptors.shape[1]
-    index = faiss.IndexFlatL2(dim)
-    index.add(descriptors)
-    return index
+    if faiss is not None:
+        dim = descriptors.shape[1]
+        index = faiss.IndexFlatL2(dim)
+        index.add(descriptors)
+        return index
+    # Fallback: return raw descriptors for brute-force search
+    return descriptors
 
 
 def retrieve(
     queries: np.ndarray,
-    index: faiss.IndexFlatL2,
+    index,
     top_k: int = 25,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Retrieve top-K nearest database entries for each query.
 
     Args:
         queries: Query descriptors of shape ``(M, D)``, float32.
-        index: FAISS index built from database descriptors.
+        index: FAISS index or numpy array (fallback).
         top_k: Number of nearest neighbors to retrieve.
 
     Returns:
@@ -43,7 +49,24 @@ def retrieve(
         - indices: Database indices, shape ``(M, top_k)``.
     """
     queries = np.ascontiguousarray(queries, dtype=np.float32)
-    distances, indices = index.search(queries, top_k)
+    if faiss is not None and not isinstance(index, np.ndarray):
+        distances, indices = index.search(queries, top_k)
+        return distances, indices
+    # Fallback: brute-force L2 search with numpy
+    db = index  # numpy array (N, D)
+    # Compute pairwise L2² distances: (M, N)
+    q_sq = np.sum(queries ** 2, axis=1, keepdims=True)
+    d_sq = np.sum(db ** 2, axis=1, keepdims=True)
+    dist_sq = q_sq + d_sq.T - 2.0 * queries @ db.T
+    dist_sq = np.maximum(dist_sq, 0.0)
+    # Get top-k smallest
+    top_k = min(top_k, db.shape[0])
+    indices = np.argpartition(dist_sq, top_k, axis=1)[:, :top_k]
+    # Sort within top-k
+    row_idx = np.arange(len(queries))[:, None]
+    sorted_order = np.argsort(dist_sq[row_idx, indices], axis=1)
+    indices = indices[row_idx, sorted_order]
+    distances = dist_sq[row_idx, indices]
     return distances, indices
 
 

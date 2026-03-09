@@ -14,7 +14,10 @@ import torch.nn.functional as F
 import numpy as np
 from typing import Optional
 
-import faiss
+try:
+    import faiss
+except (ImportError, AttributeError):
+    faiss = None
 from sklearn.neighbors import NearestNeighbors
 
 
