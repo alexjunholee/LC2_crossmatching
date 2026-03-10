@@ -62,18 +62,17 @@ pip install -e ".[all]"
 
 Recall@K (%) at 25 m threshold, range &rarr; depth direction. Bidirectional (range&harr;depth) performance is symmetric within 1.5%.
 
-Download: *(link coming soon)*
+```bash
+bash scripts/download_weights.sh
+```
+
+All weights (including `lc2_kitti360_multi.pth.tar`) are available from [Releases](https://github.com/alexjunholee/LC2_crossmatching/releases/tag/v2.0.0).
 
 ### Evaluate
 
 ```bash
-# KITTI-360
 python eval_bidirectional.py --config configs/train_kitti360_multi.yaml \
-    --checkpoint checkpoints/kitti360_multi/best.pth.tar --gem --sequences 0000 0009
-
-# Standard single-direction evaluation
-python evaluate.py --config configs/eval_kitti360.yaml \
-    --checkpoint checkpoints/kitti360_multi/best.pth.tar
+    --checkpoint pretrained/lc2_kitti360_multi.pth.tar --gem --sequences 0000 0009
 ```
 
 The evaluation script extracts descriptors for query (range) and database (depth) modalities, builds a FAISS index, retrieves top-K candidates, and reports Recall@K at multiple distance thresholds.

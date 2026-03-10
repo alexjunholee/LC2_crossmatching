@@ -33,26 +33,37 @@ done
 
 mkdir -p "$WEIGHTS_DIR"
 
+WEIGHTS=(
+    "lc2_kitti360_multi.pth.tar"
+    "lc2_kitti360.pth.tar"
+    "lc2_vivid.pth.tar"
+    "lc2_helipr.pth.tar"
+)
+
 echo "Downloading LC2 pretrained weights from $REPO (tag: $TAG)..."
 
-if command -v gh &> /dev/null; then
-    echo "Using GitHub CLI..."
-    gh release download "$TAG" -R "$REPO" -p "lc2_pretrained.pth.tar" -D "$WEIGHTS_DIR" --clobber
-elif command -v curl &> /dev/null; then
-    echo "Using curl..."
-    curl -L "https://github.com/$REPO/releases/download/$TAG/lc2_pretrained.pth.tar" \
-         -o "$WEIGHTS_DIR/lc2_pretrained.pth.tar"
-elif command -v wget &> /dev/null; then
-    echo "Using wget..."
-    wget "https://github.com/$REPO/releases/download/$TAG/lc2_pretrained.pth.tar" \
-         -O "$WEIGHTS_DIR/lc2_pretrained.pth.tar"
-else
-    echo "Error: No download tool found. Install gh, curl, or wget."
-    exit 1
-fi
+for w in "${WEIGHTS[@]}"; do
+    if [[ -f "$WEIGHTS_DIR/$w" ]]; then
+        echo "  Skipping $w (already exists)"
+        continue
+    fi
+    echo "  Downloading $w..."
+    if command -v gh &> /dev/null; then
+        gh release download "$TAG" -R "$REPO" -p "$w" -D "$WEIGHTS_DIR" --clobber
+    elif command -v curl &> /dev/null; then
+        curl -L "https://github.com/$REPO/releases/download/$TAG/$w" -o "$WEIGHTS_DIR/$w"
+    elif command -v wget &> /dev/null; then
+        wget "https://github.com/$REPO/releases/download/$TAG/$w" -O "$WEIGHTS_DIR/$w"
+    else
+        echo "Error: No download tool found. Install gh, curl, or wget."
+        exit 1
+    fi
+done
 
 echo ""
-echo "Done! Weights saved to: $WEIGHTS_DIR/lc2_pretrained.pth.tar"
+echo "Done! Weights saved to: $WEIGHTS_DIR/"
+ls -lh "$WEIGHTS_DIR/"*.pth.tar 2>/dev/null
 echo ""
-echo "Usage:"
-echo "  python evaluate.py --config configs/eval_vivid.yaml --checkpoint $WEIGHTS_DIR/lc2_pretrained.pth.tar"
+echo "Recommended (multi-seq, R@1=91%):"
+echo "  python eval_bidirectional.py --config configs/train_kitti360_multi.yaml \\"
+echo "      --checkpoint $WEIGHTS_DIR/lc2_kitti360_multi.pth.tar --gem --sequences 0000 0009"
