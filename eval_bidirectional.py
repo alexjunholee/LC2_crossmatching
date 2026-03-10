@@ -108,8 +108,9 @@ def main():
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--sequences", nargs="*", default=None,
                         help="Override eval sequences (default: use config val sequences)")
-    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--pos_threshold", type=float, default=None)
+    parser.add_argument("--gem", action="store_true", help="Use GeM pooling instead of NetVLAD")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -125,6 +126,14 @@ def main():
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     state = ckpt.get("model_state_dict", ckpt.get("state_dict", ckpt))
     model.load_state_dict(state, strict=False)
+
+    # Detect pooling mode from checkpoint or args
+    if args.gem:
+        model.set_pooling("gem")
+    elif "gem" in str(ckpt.get("config", {}).get("train", {})):
+        model.set_pooling("gem")
+    print(f"  Pooling mode: {model.pooling_mode}")
+
     model = model.to(device).eval()
     print(f"Loaded checkpoint: {args.checkpoint}")
 
@@ -163,19 +172,19 @@ def main():
         fwd = evaluate_retrieval(range_desc, depth_desc, range_pos, depth_pos,
                                  pos_threshold=pos_threshold, ks=ks, top_k=max(ks))
         for k in ks:
-            print(f"    R@{k}@{pos_threshold:.0f}m = {fwd[f'recall@{k}']:.1f}%")
+            print(f"    R@{k}@{pos_threshold:.0f}m = {fwd[f'recall@{k}']*100:.1f}%")
 
         # Reverse: depth(Q) → range(DB)  [LC2++ direction]
         print(f"\n  [Reverse] depth(Q) → range(DB)")
         rev = evaluate_retrieval(depth_desc, range_desc, depth_pos, range_pos,
                                  pos_threshold=pos_threshold, ks=ks, top_k=max(ks))
         for k in ks:
-            print(f"    R@{k}@{pos_threshold:.0f}m = {rev[f'recall@{k}']:.1f}%")
+            print(f"    R@{k}@{pos_threshold:.0f}m = {rev[f'recall@{k}']*100:.1f}%")
 
         # Delta
         print(f"\n  Delta (Rev - Fwd):")
         for k in ks:
-            delta = rev[f"recall@{k}"] - fwd[f"recall@{k}"]
+            delta = (rev[f"recall@{k}"] - fwd[f"recall@{k}"]) * 100
             print(f"    R@{k}: {delta:+.1f}%")
 
 

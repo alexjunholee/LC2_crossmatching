@@ -51,36 +51,32 @@ pip install -e ".[all]"
 
 ## Quick Start
 
-### Download pretrained weights
+### Pretrained Weights
+
+**KITTI-360 multi-sequence** (train: 0002/0004/0005/0006, GeM pooling, Depth Anything 3):
+
+| Sequence | R@1 | R@5 | R@10 | R@20 |
+|----------|-----|-----|------|------|
+| 0000 (val) | 91.2 | 98.8 | 99.6 | 99.9 |
+| 0009 (test) | 92.4 | 99.4 | 99.9 | 100.0 |
+
+Recall@K (%) at 25 m threshold, range &rarr; depth direction. Bidirectional (range&harr;depth) performance is symmetric within 1.5%.
+
+Download: *(link coming soon)*
+
+### Evaluate
 
 ```bash
-bash scripts/download_weights.sh
-```
+# KITTI-360
+python eval_bidirectional.py --config configs/train_kitti360_multi.yaml \
+    --checkpoint checkpoints/kitti360_multi/best.pth.tar --gem --sequences 0000 0009
 
-This downloads `lc2_pretrained.pth.tar` into the `pretrained/` directory. The script supports `gh`, `curl`, and `wget` backends.
-
-### Evaluate on VIVID
-
-```bash
-python evaluate.py --config configs/eval_vivid.yaml \
-    --checkpoint pretrained/lc2_pretrained.pth.tar
-```
-
-### Evaluate on KITTI-360
-
-```bash
+# Standard single-direction evaluation
 python evaluate.py --config configs/eval_kitti360.yaml \
-    --checkpoint pretrained/lc2_pretrained.pth.tar
+    --checkpoint checkpoints/kitti360_multi/best.pth.tar
 ```
 
-### Evaluate on HeLiPR
-
-```bash
-python evaluate.py --config configs/eval_helipr.yaml \
-    --checkpoint pretrained/lc2_pretrained.pth.tar
-```
-
-The evaluation script extracts descriptors for query (range) and database (depth) modalities, builds a FAISS index, retrieves top-K candidates, and reports Recall@K at multiple distance thresholds. Results are saved to the `results/` directory.
+The evaluation script extracts descriptors for query (range) and database (depth) modalities, builds a FAISS index, retrieves top-K candidates, and reports Recall@K at multiple distance thresholds.
 
 ## Dataset Preparation
 
@@ -201,6 +197,7 @@ python preprocess_range.py --dataset vivid --sequences campus_day1 \
 ```
 
 Available infill methods: `none` (default), `nearest_neighbor`, `bilateral`, `morphological`, `adaptive`.
+
 
 ## Training
 
