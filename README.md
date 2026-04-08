@@ -53,20 +53,29 @@ pip install -e ".[all]"
 
 ### Pretrained Weights
 
-**KITTI-360 multi-sequence** (train: 0002/0004/0005/0006, GeM pooling, Depth Anything 3):
+**KITTI-360 multi-sequence** (train: 0002/0004/0005/0006, Phase 2 NetVLAD):
 
 | Sequence | R@1 | R@5 | R@10 | R@20 |
 |----------|-----|-----|------|------|
 | 0000 (val) | 91.2 | 98.8 | 99.6 | 99.9 |
 | 0009 (test) | 92.4 | 99.4 | 99.9 | 100.0 |
 
-Recall@K (%) at 25 m threshold, range &rarr; depth direction. Bidirectional (range&harr;depth) performance is symmetric within 1.5%.
+**VIVID** (train: campus\_day1 + city\_val1, multi-positive ranking, GeM):
+
+| Sequence | C&rarr;L R@1 | L&rarr;C R@1 |
+|----------|-------------|-------------|
+| campus\_val1 | 47.8 | 39.3 |
+| campus\_day2 | **61.9** | 53.5 |
+| city\_val1 | 69.6 | 66.8 |
+| city\_val2 | 47.7 | 52.6 |
+
+Recall@1 (%) at 25 m threshold.
 
 ```bash
 bash scripts/download_weights.sh
 ```
 
-All weights (including `lc2_kitti360_multi.pth.tar`) are available from [Releases](https://github.com/alexjunholee/LC2_crossmatching/releases/tag/v2.0.0).
+All weights are available from [Releases](https://github.com/alexjunholee/LC2_crossmatching/releases).
 
 ### Evaluate
 
