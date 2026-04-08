@@ -31,12 +31,15 @@ class DualEncoder(nn.Module):
 
     enc_dim: int = 512
 
-    def __init__(self, pretrained_weights: Optional[str] = None) -> None:
+    def __init__(self, pretrained_weights: Optional[str] = None,
+                 freeze_until: int = 24) -> None:
         """
         Args:
             pretrained_weights: If ``"imagenet"`` or ``None``, initialize both
                 branches from ImageNet-pretrained VGG16. Otherwise interpreted
                 as a path or torchvision weight enum.
+            freeze_until: Freeze layers [0, freeze_until). Default 24 = freeze
+                conv1-conv4, train conv5 only. Set to 0 to train all layers.
         """
         super().__init__()
 
@@ -46,16 +49,15 @@ class DualEncoder(nn.Module):
 
         # VGG16 features has 31 children (conv, relu, pool layers).
         # features[:-2] removes the last MaxPool2d and preceding ReLU,
-        # keeping through conv5_3 + ReLU (index 28).
+        # keeping through conv5_3 (index 28). Output has mixed +/- values.
         layers_d = list(encoder_d.features.children())[:-2]
         layers_r = list(encoder_r.features.children())[:-2]
 
-        # Freeze all layers except the last 5 (conv5_1, relu, conv5_2, relu, conv5_3).
-        # VGG16 features[:-2] has 29 layers; [-5:] = indices 24..28 = conv5 block.
-        for layer in layers_d[:-5]:
+        # Freeze layers below freeze_until index.
+        for layer in layers_d[:freeze_until]:
             for p in layer.parameters():
                 p.requires_grad = False
-        for layer in layers_r[:-5]:
+        for layer in layers_r[:freeze_until]:
             for p in layer.parameters():
                 p.requires_grad = False
 

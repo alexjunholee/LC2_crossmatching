@@ -56,8 +56,11 @@ class Phase1Pool:
         self.positions: List[np.ndarray] = []
         self.headings: List[float] = []
         self.is_range: List[bool] = []
+        self.is_normal: List[bool] = []
         self.fov_deg: List[float] = []
         self.crop_idx: List[int] = []
+        self.camera_hfov_deg: float = 90.0
+        self.forward_col_frac: float = 0.5
 
     def add(
         self,
@@ -67,11 +70,13 @@ class Phase1Pool:
         is_range: bool,
         fov_deg: float,
         crop_idx: int = -1,
+        is_normal: bool = False,
     ) -> None:
         self.paths.append(path)
         self.positions.append(position[:2].astype(np.float64))
         self.headings.append(heading)
         self.is_range.append(is_range)
+        self.is_normal.append(is_normal)
         self.fov_deg.append(fov_deg)
         self.crop_idx.append(crop_idx)
 
@@ -100,6 +105,7 @@ class ContrastivePairMiner:
         lidar_range_m: float = 50.0,
         camera_range_m: float = 50.0,
         psi_grid_res: int = 64,
+        positive_mode: str = "all",
     ) -> None:
         self.pool = pool
         print("Computing pairwise ψ pairs (sparse)...")
@@ -119,6 +125,19 @@ class ContrastivePairMiner:
             max_ranges=max_ranges,
             max_dist=max_range_m,
         )
+
+        if positive_mode not in {"all", "cross_modal_only"}:
+            raise ValueError(
+                f"Unknown positive_mode={positive_mode!r}; "
+                "use 'all' or 'cross_modal_only'."
+            )
+
+        if positive_mode == "cross_modal_only":
+            positive_pairs = [
+                (i, j, psi)
+                for i, j, psi in positive_pairs
+                if pool.is_range[i] != pool.is_range[j]
+            ]
 
         # Build set of positive pair indices for fast negative sampling
         N = len(pool)
@@ -143,6 +162,11 @@ class ContrastivePairMiner:
 
         n_pos = len(positive_pairs)
         n_neg = len(self.pairs) - n_pos
+        pos_rr = sum(1 for i, j, _ in positive_pairs if pool.is_range[i] and pool.is_range[j])
+        pos_dd = sum(1 for i, j, _ in positive_pairs if (not pool.is_range[i]) and (not pool.is_range[j]))
+        pos_rd = n_pos - pos_rr - pos_dd
+        print(f"  Positive mode: {positive_mode}")
+        print(f"  Positive pairs by modality: rr={pos_rr}, dd={pos_dd}, rd={pos_rd}")
         print(f"  Pairs: {len(self.pairs)} (positive: {n_pos}, negative: {n_neg})")
 
 
@@ -183,28 +207,55 @@ class LC2ContrastivePairDataset(Dataset):
     def _load_image(self, idx: int) -> Tuple[torch.Tensor, bool]:
         """Load and preprocess a single image from the pool."""
         data = np.load(str(self.pool.paths[idx]))
+
+        is_range = self.pool.is_range[idx]
+        is_normal = self.pool.is_normal[idx] if hasattr(self.pool, 'is_normal') and idx < len(self.pool.is_normal) else False
+        crop_idx = self.pool.crop_idx[idx]
+
+        # Normal map: (H,W,3) float32 [-1,1] → [0,1]
+        if is_normal:
+            from lc2.data.transforms import normalize_normal_map
+            data = normalize_normal_map(data)  # (H,W,3) [0,1]
+            img = self.transform(data)
+            return img, is_range
+
         if data.ndim > 2:
             data = squeeze_depth(data)
 
-        is_range = self.pool.is_range[idx]
-        crop_idx = self.pool.crop_idx[idx]
+        range_is_camproj = getattr(self.pool, 'range_is_camproj', False)
+        crop_px = getattr(self.pool, 'crop_px', 0)
 
         if is_range:
-            # Range image: apply crop (Phase 1 augmentation)
-            # Skip crop for n_crops=1 (camera-view range, not panoramic)
-            if crop_idx >= 0 and self.n_crops > 1:
-                data = crop_range_panoramic(
-                    data, crop_idx,
-                    n_crops=self.n_crops,
-                    crop_fov_deg=self.crop_fov_deg,
-                )
-            # Apply range augmentation (after crop, before transform)
-            if self.range_augmentation is not None:
-                data = self.range_augmentation(data)
-            data = normalize_disparity(data)
+            if range_is_camproj:
+                # Camera-projected LiDAR depth: same as depth preprocessing
+                data = depth_to_normalized_disparity(data)
+            else:
+                # Range image: apply crop (Phase 1 augmentation)
+                if crop_idx >= 0 and self.n_crops > 1:
+                    data = crop_range_panoramic(
+                        data, crop_idx,
+                        n_crops=self.n_crops,
+                        crop_fov_deg=self.crop_fov_deg,
+                    )
+                else:
+                    # n_crops=1: crop to camera FoV (same as eval path)
+                    camera_hfov = getattr(self.pool, 'camera_hfov_deg', 85.9)
+                    forward_frac = getattr(self.pool, 'forward_col_frac', 0.996)
+                    if camera_hfov < 360.0:
+                        data = crop_range_to_camera_fov(
+                            data, camera_hfov_deg=camera_hfov,
+                            forward_col_frac=forward_frac,
+                        )
+                # Apply range augmentation (after crop, before transform)
+                if self.range_augmentation is not None:
+                    data = self.range_augmentation(data)
+                # Convert range to disparity (same as eval)
+                data = range_to_normalized_disparity(data)
         else:
             # Depth: convert to disparity (paper Section III.A.2)
             # + optional scale augmentation (paper Section III.C.2)
+            if crop_px > 0:
+                data = data[crop_px:-crop_px, crop_px:-crop_px]
             disp = depth_to_disparity(data)
             if self.scale_augment:
                 disp = scale_augment_disparity(disp, self.max_scale_pct)
@@ -232,6 +283,84 @@ class LC2ContrastivePairDataset(Dataset):
 
 
 # ─────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────
+# Phase 1 Ranking: one-to-one paired batch for InfoNCE ranking loss
+# ─────────────────────────────────────────────────────────────────
+
+class RankingPairDataset(Dataset):
+    """Dataset of one-to-one (range, depth) pairs for ranking loss.
+
+    Each sample returns a range image and its paired depth image.
+    In a batch, all range images are unique queries and all depth images
+    are unique DB entries. BidirectionalInfoNCE treats diagonal as positive
+    and off-diagonal as in-batch negatives.
+
+    For multi-positive mode, also stores positions so that the training loop
+    can build a pos_mask from in-batch distances at collation time.
+
+    Args:
+        jitter_cols: List of column offsets for camera-forward jitter.
+        pos_threshold: Distance threshold for multi-positive mask (meters).
+    """
+
+    def __init__(
+        self,
+        pairs: List[Tuple[int, int, float]],
+        pool: "Phase1Pool",
+        transform,
+        jitter_cols: Optional[List[int]] = None,
+        pos_threshold: float = 10.0,
+    ) -> None:
+        self.pairs = pairs  # (range_idx, depth_idx, psi)
+        self.pool = pool
+        self.transform = transform
+        self.jitter_cols = jitter_cols or [0]
+        self.pos_threshold = pos_threshold
+        self._positions = pool.position_array()
+
+    def __len__(self) -> int:
+        return len(self.pairs)
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        r_idx, d_idx, psi = self.pairs[idx]
+
+        # Range: crop to camera FoV + disparity
+        r_data = np.load(str(self.pool.paths[r_idx]))
+        if r_data.ndim > 2:
+            r_data = squeeze_depth(r_data)
+        camera_hfov = getattr(self.pool, 'camera_hfov_deg', 85.9)
+        forward_frac = getattr(self.pool, 'forward_col_frac', 0.996)
+
+        # Apply random jitter to crop center
+        W = r_data.shape[1]
+        delta = int(np.random.choice(self.jitter_cols))
+        jittered_frac = forward_frac + delta / W
+
+        if camera_hfov < 360.0:
+            r_data = crop_range_to_camera_fov(
+                r_data, camera_hfov_deg=camera_hfov,
+                forward_col_frac=jittered_frac)
+        r_data = range_to_normalized_disparity(r_data)
+        img_r = self.transform(r_data)
+
+        # Depth: disparity (same as eval, no jitter)
+        d_data = np.load(str(self.pool.paths[d_idx]))
+        if d_data.ndim > 2:
+            d_data = squeeze_depth(d_data)
+        d_data = depth_to_normalized_disparity(d_data)
+        img_d = self.transform(d_data)
+
+        return {
+            "image_i": img_r,
+            "image_j": img_d,
+            "is_range_i": True,
+            "is_range_j": False,
+            "psi": float(psi),
+            "pos_r": torch.tensor(self._positions[r_idx], dtype=torch.float32),
+            "pos_d": torch.tensor(self._positions[d_idx], dtype=torch.float32),
+        }
+
+
 # Phase 2: Triplet dataset (kept from original implementation)
 # ─────────────────────────────────────────────────────────────────
 
@@ -245,17 +374,24 @@ class ImagePool:
     """
 
     def __init__(self, all_range_preprocess: bool = False,
-                 forward_all_as_range: bool = False) -> None:
+                 forward_all_as_range: bool = False,
+                 range_is_camproj: bool = False,
+                 crop_px: int = 0) -> None:
         self.paths: List[Path] = []
         self.positions: List[np.ndarray] = []
         self.is_range: List[bool] = []
+        self.is_normal: List[bool] = []
         self.all_range_preprocess = all_range_preprocess
         self.forward_all_as_range = forward_all_as_range
+        self.range_is_camproj = range_is_camproj
+        self.crop_px = crop_px
 
-    def add(self, path: Path, position: np.ndarray, is_range: bool) -> None:
+    def add(self, path: Path, position: np.ndarray, is_range: bool,
+            is_normal: bool = False) -> None:
         self.paths.append(path)
         self.positions.append(position[:2].astype(np.float64))
         self.is_range.append(is_range)
+        self.is_normal.append(is_normal)
 
     def __len__(self) -> int:
         return len(self.paths)
@@ -282,23 +418,38 @@ class TripletMiner:
         self.neg_dist_thr = neg_dist_thr
         self.n_neg = n_neg
 
+        from scipy.spatial import cKDTree
+
         pos = pool.position_array()
-        diff = pos[:, None, :] - pos[None, :, :]
-        self.dist_matrix = np.sqrt((diff ** 2).sum(axis=2))
+        is_range_arr = np.array(pool.is_range)
+        N = len(pool)
+
+        # KD-tree for efficient spatial queries (O(N log N) vs O(N²))
+        tree = cKDTree(pos)
+        nearby = tree.query_ball_point(pos, r=neg_dist_thr, workers=-1)
 
         # Cross-modal positive and negative pools
         self.positive_pool: List[List[int]] = []
         self.negative_pool: List[List[int]] = []
-        is_range_arr = np.array(pool.is_range)
-        N = len(pool)
+        all_indices = set(range(N))
         for i in range(N):
-            pos_mask = self.dist_matrix[i] < pos_dist_thr
-            neg_mask = self.dist_matrix[i] >= neg_dist_thr
-            pos_mask[i] = False
+            nearby_set = set(nearby[i])
             cross_modal_mask = is_range_arr != is_range_arr[i]
-            pos_mask = pos_mask & cross_modal_mask
-            self.positive_pool.append(np.where(pos_mask)[0].tolist())
-            self.negative_pool.append(np.where(neg_mask)[0].tolist())
+            # Positives: within pos_dist_thr AND cross-modal
+            pos_candidates = []
+            for j in nearby[i]:
+                if j != i and cross_modal_mask[j]:
+                    d = np.linalg.norm(pos[i] - pos[j])
+                    if d < pos_dist_thr:
+                        pos_candidates.append(j)
+            self.positive_pool.append(pos_candidates)
+            # Negatives: beyond neg_dist_thr (not in nearby set)
+            neg_candidates = [j for j in (all_indices - nearby_set) if cross_modal_mask[j]]
+            self.negative_pool.append(neg_candidates)
+
+        # Store dist_matrix=None; compute on-demand in mine()
+        self.dist_matrix = None
+        self._positions = pos
 
     @torch.no_grad()
     def compute_descriptors(
@@ -308,6 +459,7 @@ class TripletMiner:
         device: torch.device,
         batch_size: int = 64,
         camera_hfov_deg: float = 90.0,
+        forward_col_frac: float = 0.5,
     ) -> np.ndarray:
         """Extract descriptors for all images in the pool.
 
@@ -324,18 +476,31 @@ class TripletMiner:
             is_range_flags = []
             for idx in batch_idx:
                 data = np.load(str(self.pool.paths[idx]))
-                if data.ndim > 2:
-                    data = squeeze_depth(data)
 
-                if self.pool.is_range[idx]:
-                    if camera_hfov_deg < 360.0:
-                        data = crop_range_to_camera_fov(data, camera_hfov_deg=camera_hfov_deg)
-                    data = normalize_disparity(data)
-                elif self.pool.all_range_preprocess:
-                    # HeLiPR: both modalities are range images
-                    data = normalize_disparity(data)
+                is_normal = self.pool.is_normal[idx] if hasattr(self.pool, 'is_normal') and idx < len(self.pool.is_normal) else False
+                if is_normal:
+                    from lc2.data.transforms import normalize_normal_map
+                    data = normalize_normal_map(data)
                 else:
-                    data = depth_to_normalized_disparity(data)
+                    if data.ndim > 2:
+                        data = squeeze_depth(data)
+
+                    if self.pool.is_range[idx]:
+                        if self.pool.range_is_camproj:
+                            data = depth_to_normalized_disparity(data)
+                        else:
+                            if camera_hfov_deg < 360.0:
+                                data = crop_range_to_camera_fov(
+                                    data, camera_hfov_deg=camera_hfov_deg,
+                                    forward_col_frac=forward_col_frac,
+                                )
+                            data = range_to_normalized_disparity(data)
+                    elif self.pool.all_range_preprocess:
+                        pass  # Range: already [0,1]
+                    else:
+                        if self.pool.crop_px > 0:
+                            data = data[self.pool.crop_px:-self.pool.crop_px, self.pool.crop_px:-self.pool.crop_px]
+                        data = depth_to_normalized_disparity(data)
 
                 img = transform(data)
                 images.append(img)
@@ -412,6 +577,7 @@ class LC2TripletDataset(Dataset):
         pool: ImagePool,
         transform,
         camera_hfov_deg: float = 90.0,
+        forward_col_frac: float = 0.5,
         range_augmentation=None,
         depth_augmentation=None,
     ) -> None:
@@ -419,6 +585,7 @@ class LC2TripletDataset(Dataset):
         self.pool = pool
         self.transform = transform
         self.camera_hfov_deg = camera_hfov_deg
+        self.forward_col_frac = forward_col_frac
         self.range_augmentation = range_augmentation
         self.depth_augmentation = depth_augmentation
 
@@ -433,23 +600,35 @@ class LC2TripletDataset(Dataset):
         is_range = []
         for i in all_idx:
             data = np.load(str(self.pool.paths[i]))
-            if data.ndim > 2:
-                data = squeeze_depth(data)
 
-            if self.pool.is_range[i]:
-                # Range: crop to camera FoV (paper Section III.B.4)
-                if self.camera_hfov_deg < 360.0:
-                    data = crop_range_to_camera_fov(data, camera_hfov_deg=self.camera_hfov_deg)
-                if self.range_augmentation is not None:
-                    data = self.range_augmentation(data)
-                data = normalize_disparity(data)
-            elif self.pool.all_range_preprocess:
-                # HeLiPR: both modalities are range images
-                data = normalize_disparity(data)
+            is_normal = self.pool.is_normal[i] if hasattr(self.pool, 'is_normal') and i < len(self.pool.is_normal) else False
+            if is_normal:
+                from lc2.data.transforms import normalize_normal_map
+                data = normalize_normal_map(data)
             else:
-                data = depth_to_normalized_disparity(data)
-                if self.depth_augmentation is not None:
-                    data = self.depth_augmentation(data)
+                if data.ndim > 2:
+                    data = squeeze_depth(data)
+
+                if self.pool.is_range[i]:
+                    if self.pool.range_is_camproj:
+                        data = depth_to_normalized_disparity(data)
+                    else:
+                        if self.camera_hfov_deg < 360.0:
+                            data = crop_range_to_camera_fov(
+                                data, camera_hfov_deg=self.camera_hfov_deg,
+                                forward_col_frac=self.forward_col_frac,
+                            )
+                        if self.range_augmentation is not None:
+                            data = self.range_augmentation(data)
+                        data = range_to_normalized_disparity(data)
+                elif self.pool.all_range_preprocess:
+                    pass  # Range: already [0,1]
+                else:
+                    if self.pool.crop_px > 0:
+                        data = data[self.pool.crop_px:-self.pool.crop_px, self.pool.crop_px:-self.pool.crop_px]
+                    data = depth_to_normalized_disparity(data)
+                    if self.depth_augmentation is not None:
+                        data = self.depth_augmentation(data)
 
             img = self.transform(data)
             images.append(img)
@@ -472,6 +651,7 @@ def build_kitti360_phase1_pool(
     sequences: List[str],
     depth_cache_dir: Optional[str] = None,
     range_cache_dir: Optional[str] = None,
+    normal_cache_dir: Optional[str] = None,
     range_subsample: int = 10,
     depth_subsample: int = 10,
     n_crops: int = 8,
@@ -505,7 +685,7 @@ def build_kitti360_phase1_pool(
                     fov_deg=crop_fov_deg,
                     crop_idx=crop_k,
                 )
-    except FileNotFoundError as e:
+    except (FileNotFoundError, ValueError) as e:
         print(f"  Warning: range data not found: {e}")
 
     # Depth images
@@ -530,6 +710,29 @@ def build_kitti360_phase1_pool(
         except FileNotFoundError as e:
             print(f"  Warning: depth data not found: {e}")
 
+    # Normal maps (alternative to depth — used as LiDAR branch)
+    if normal_cache_dir:
+        try:
+            ds_n = KITTI360LC2Dataset(
+                root=root, sequences=sequences, modality="normal",
+                normal_cache_dir=normal_cache_dir, subsample=depth_subsample,
+            )
+            positions_n = ds_n.get_positions()
+            headings_n = compute_headings(positions_n)
+
+            for i in range(len(ds_n)):
+                pool.add(
+                    path=ds_n.samples[i][0],
+                    position=positions_n[i],
+                    heading=headings_n[i],
+                    is_range=True,  # treated as LiDAR branch
+                    fov_deg=camera_hfov_deg,
+                    crop_idx=-1,
+                    is_normal=True,
+                )
+        except FileNotFoundError as e:
+            print(f"  Warning: normal data not found: {e}")
+
     return pool
 
 
@@ -538,6 +741,7 @@ def build_kitti360_pool(
     sequences: List[str],
     depth_cache_dir: Optional[str] = None,
     range_cache_dir: Optional[str] = None,
+    normal_cache_dir: Optional[str] = None,
     range_subsample: int = 10,
     depth_subsample: int = 10,
 ) -> ImagePool:
@@ -546,15 +750,16 @@ def build_kitti360_pool(
 
     pool = ImagePool()
 
-    try:
-        ds_r = KITTI360LC2Dataset(
-            root=root, sequences=sequences, modality="range",
-            range_cache_dir=range_cache_dir, subsample=range_subsample,
-        )
-        for i in range(len(ds_r)):
-            pool.add(ds_r.samples[i][0], ds_r.positions[i], is_range=True)
-    except FileNotFoundError as e:
-        print(f"  Warning: range data not found: {e}")
+    if range_cache_dir:
+        try:
+            ds_r = KITTI360LC2Dataset(
+                root=root, sequences=sequences, modality="range",
+                range_cache_dir=range_cache_dir, subsample=range_subsample,
+            )
+            for i in range(len(ds_r)):
+                pool.add(ds_r.samples[i][0], ds_r.positions[i], is_range=True)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"  Warning: range data not found: {e}")
 
     if depth_cache_dir:
         try:
@@ -564,8 +769,20 @@ def build_kitti360_pool(
             )
             for i in range(len(ds_d)):
                 pool.add(ds_d.samples[i][0], ds_d.positions[i], is_range=False)
-        except FileNotFoundError as e:
+        except (FileNotFoundError, ValueError) as e:
             print(f"  Warning: depth data not found: {e}")
+
+    if normal_cache_dir:
+        try:
+            ds_n = KITTI360LC2Dataset(
+                root=root, sequences=sequences, modality="normal",
+                normal_cache_dir=normal_cache_dir, subsample=depth_subsample,
+            )
+            for i in range(len(ds_n)):
+                pool.add(ds_n.samples[i][0], ds_n.positions[i],
+                         is_range=True, is_normal=True)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"  Warning: normal data not found: {e}")
 
     return pool
 
@@ -580,6 +797,9 @@ def build_vivid_phase1_pool(
     n_crops: int = 8,
     crop_fov_deg: float = 90.0,
     camera_hfov_deg: float = 90.0,
+    range_is_camproj: bool = False,
+    crop_px: int = 0,
+    spatial_radius: float = 0.0,
 ) -> Phase1Pool:
     """Build a Phase1Pool from VIVID sequences with range crops and FoV metadata.
 
@@ -599,6 +819,10 @@ def build_vivid_phase1_pool(
     from lc2.data.vivid import VIVIDLC2Dataset
 
     pool = Phase1Pool()
+    pool.range_is_camproj = range_is_camproj
+    pool.crop_px = crop_px
+    pool.camera_hfov_deg = camera_hfov_deg
+    pool.forward_col_frac = 0.996  # VIVID calibrated value
     crop_step_deg = 360.0 / n_crops  # 45° for 8 crops
 
     for seq in sequences:
@@ -649,6 +873,26 @@ def build_vivid_phase1_pool(
                     )
             except FileNotFoundError:
                 pass
+
+    if spatial_radius > 0 and len(pool) > 0:
+        positions = pool.position_array()
+        center = positions.mean(axis=0)
+        mask = (np.abs(positions[:, 0] - center[0]) < spatial_radius) & \
+               (np.abs(positions[:, 1] - center[1]) < spatial_radius)
+        idx = np.where(mask)[0]
+        filtered = Phase1Pool()
+        filtered.camera_hfov_deg = pool.camera_hfov_deg
+        filtered.forward_col_frac = pool.forward_col_frac
+        filtered.range_is_camproj = pool.range_is_camproj
+        filtered.crop_px = pool.crop_px
+        for ii in idx:
+            filtered.add(
+                path=pool.paths[ii], position=pool.positions[ii],
+                heading=pool.headings[ii], is_range=pool.is_range[ii],
+                fov_deg=pool.fov_deg[ii], crop_idx=pool.crop_idx[ii],
+            )
+        print(f"  Phase1 spatial crop: radius={spatial_radius}m, {len(filtered)}/{len(pool)} entries kept")
+        return filtered
 
     return pool
 
@@ -705,6 +949,9 @@ def build_vivid_pool(
     range_cache_dir: Optional[str] = None,
     range_subsample: int = 10,
     depth_subsample: int = 10,
+    range_is_camproj: bool = False,
+    crop_px: int = 0,
+    spatial_radius: float = 0.0,
 ) -> ImagePool:
     """Build an ImagePool from VIVID sequences for Phase 2.
 
@@ -713,7 +960,7 @@ def build_vivid_pool(
     """
     from lc2.data.vivid import VIVIDLC2Dataset
 
-    pool = ImagePool()
+    pool = ImagePool(range_is_camproj=range_is_camproj, crop_px=crop_px)
 
     for seq in sequences:
         try:
@@ -738,5 +985,17 @@ def build_vivid_pool(
                     pool.add(ds_d.samples[i], ds_d.positions[i], is_range=False)
             except FileNotFoundError:
                 pass
+
+    if spatial_radius > 0 and len(pool) > 0:
+        positions = np.array(pool.positions)
+        center = positions.mean(axis=0)
+        mask = (np.abs(positions[:, 0] - center[0]) < spatial_radius) & \
+               (np.abs(positions[:, 1] - center[1]) < spatial_radius)
+        idx = np.where(mask)[0]
+        filtered = ImagePool(range_is_camproj=range_is_camproj, crop_px=crop_px)
+        for i in idx:
+            filtered.add(pool.paths[i], pool.positions[i], is_range=pool.is_range[i])
+        print(f"  Spatial crop: radius={spatial_radius}m, {len(filtered)}/{len(pool)} entries kept")
+        return filtered
 
     return pool

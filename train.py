@@ -30,7 +30,7 @@ import argparse
 import sys
 import time
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
 import numpy as np
 import torch
@@ -42,7 +42,7 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent))
 
 from lc2.model import LC2Model
-from lc2.losses import LC2ContrastiveLoss
+from lc2.losses import LC2ContrastiveLoss, BidirectionalInfoNCELoss, MultiPositiveInfoNCELoss
 from lc2.data.transforms import (
     get_transform, depth_to_normalized_disparity,
     range_to_normalized_disparity, normalize_disparity, squeeze_depth, crop_range_to_camera_fov,
@@ -81,6 +81,7 @@ def init_netvlad_from_data(
     num_clusters: int = 16,
     batch_size: int = 64,
     camera_hfov_deg: float = 90.0,
+    forward_col_frac: float = 0.5,
 ) -> None:
     """Initialize NetVLAD centroids via K-means on encoder features."""
     from sklearn.cluster import MiniBatchKMeans
@@ -105,8 +106,11 @@ def init_netvlad_from_data(
 
                 if pool.is_range[idx]:
                     if camera_hfov_deg < 360.0:
-                        data = crop_range_to_camera_fov(data, camera_hfov_deg=camera_hfov_deg)
-                    data = normalize_disparity(data)
+                        data = crop_range_to_camera_fov(
+                            data, camera_hfov_deg=camera_hfov_deg,
+                            forward_col_frac=forward_col_frac,
+                        )
+                    data = range_to_normalized_disparity(data)
                 else:
                     data = depth_to_normalized_disparity(data)
 
@@ -168,6 +172,8 @@ def validate(
     top_k = val_cfg.get("top_k", max(ks))
 
     camera_hfov_deg = input_cfg.get("camera_hfov_deg", None)
+    forward_col_frac = input_cfg.get("forward_col_frac", 0.5)
+    val_subsample = val_cfg.get("subsample", 10)
 
     resize_cfg = input_cfg.get("resize", None)
     input_size = tuple(resize_cfg) if resize_cfg else None
@@ -180,45 +186,58 @@ def validate(
     for seq in val_seqs:
         try:
             if dataset_name == "kitti360":
-                ds_q = KITTI360LC2Dataset(
-                    root=dataset_cfg["root"], sequences=[seq],
-                    modality="range",
-                    range_cache_dir=dataset_cfg.get("range_cache_dir"),
-                    subsample=10, input_size=input_size,
-                    camera_hfov_deg=camera_hfov_deg,
-                )
+                # Use normal maps if available, else range
+                normal_dir = dataset_cfg.get("normal_cache_dir")
+                if normal_dir:
+                    ds_q = KITTI360LC2Dataset(
+                        root=dataset_cfg["root"], sequences=[seq],
+                        modality="normal",
+                        normal_cache_dir=normal_dir,
+                        subsample=val_subsample, input_size=input_size,
+                    )
+                else:
+                    ds_q = KITTI360LC2Dataset(
+                        root=dataset_cfg["root"], sequences=[seq],
+                        modality="range",
+                        range_cache_dir=dataset_cfg.get("range_cache_dir"),
+                        subsample=val_subsample, input_size=input_size,
+                        camera_hfov_deg=camera_hfov_deg,
+                    )
                 ds_d = KITTI360LC2Dataset(
                     root=dataset_cfg["root"], sequences=[seq],
                     modality="depth",
                     depth_cache_dir=dataset_cfg.get("depth_cache_dir"),
-                    subsample=10, input_size=input_size,
+                    subsample=val_subsample, input_size=input_size,
                 )
             elif dataset_name == "helipr":
                 ds_q = HeLiPRLC2Dataset(
                     root=dataset_cfg["root"], sequences=[seq],
                     modality="ouster",
                     ouster_cache_dir=dataset_cfg.get("ouster_cache_dir"),
-                    subsample=10, input_size=input_size,
+                    subsample=val_subsample, input_size=input_size,
                 )
                 ds_d = HeLiPRLC2Dataset(
                     root=dataset_cfg["root"], sequences=[seq],
                     modality="velodyne",
                     velodyne_cache_dir=dataset_cfg.get("velodyne_cache_dir"),
-                    subsample=10, input_size=input_size,
+                    subsample=val_subsample, input_size=input_size,
                 )
             else:
                 ds_q = VIVIDLC2Dataset(
                     root=dataset_cfg["root"], sequence=seq,
-                    modality="range", subsample=10,
+                    modality="range", subsample=val_subsample,
                     range_cache_dir=dataset_cfg.get("range_cache_dir"),
                     input_size=input_size,
                     camera_hfov_deg=camera_hfov_deg,
+                    forward_col_frac=forward_col_frac,
+                    range_is_camproj=input_cfg.get("range_is_camproj", False),
                 )
                 ds_d = VIVIDLC2Dataset(
                     root=dataset_cfg["root"], sequence=seq,
                     modality="depth",
                     depth_cache_dir=dataset_cfg.get("depth_cache_dir"),
-                    subsample=10, input_size=input_size,
+                    subsample=val_subsample, input_size=input_size,
+                    crop_px=input_cfg.get("crop_px", 0),
                 )
         except FileNotFoundError:
             continue
@@ -253,6 +272,20 @@ def validate(
     query_pos = np.concatenate(query_pos_list, axis=0)
     db_pos = np.concatenate(db_pos_list, axis=0)
 
+    # Apply spatial crop to validation if configured
+    val_spatial_radius = train_cfg.get("spatial_radius", 0.0)
+    if val_spatial_radius > 0:
+        center_q = query_pos.mean(axis=0)
+        mask_q = (np.abs(query_pos[:, 0] - center_q[0]) < val_spatial_radius) & \
+                 (np.abs(query_pos[:, 1] - center_q[1]) < val_spatial_radius)
+        mask_d = (np.abs(db_pos[:, 0] - center_q[0]) < val_spatial_radius) & \
+                 (np.abs(db_pos[:, 1] - center_q[1]) < val_spatial_radius)
+        query_desc = query_desc[mask_q]
+        query_pos = query_pos[mask_q]
+        db_desc = db_desc[mask_d]
+        db_pos = db_pos[mask_d]
+        print(f"  Val spatial crop: radius={val_spatial_radius}m, Q={mask_q.sum()}, DB={mask_d.sum()}")
+
     return evaluate_retrieval(
         query_desc, db_desc, query_pos, db_pos,
         pos_threshold=pos_threshold, ks=ks, top_k=top_k,
@@ -266,17 +299,20 @@ def validate(
 def train_phase1_epoch(
     model: LC2Model,
     pair_dataset: LC2ContrastivePairDataset,
-    criterion: LC2ContrastiveLoss,
+    criterion: nn.Module,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     batch_size: int = 4,
     epoch: int = 0,
+    scaler: Optional[torch.amp.GradScaler] = None,
+    loss_name: str = "contrastive",
 ) -> float:
     """Train one epoch with contrastive loss (Phase 1)."""
     loader = DataLoader(
         pair_dataset, batch_size=batch_size, shuffle=True,
         num_workers=4, pin_memory=True, drop_last=True,
     )
+    use_amp = scaler is not None
 
     model.train()
     total_loss = 0.0
@@ -289,14 +325,31 @@ def train_phase1_epoch(
         is_range_j = batch["is_range_j"].to(device)
         psi = batch["psi"].float().to(device)
 
-        desc_i = model(img_i, is_range_i)
-        desc_j = model(img_j, is_range_j)
-
-        loss = criterion(desc_i, desc_j, psi)
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            desc_i = model(img_i, is_range_i)
+            desc_j = model(img_j, is_range_j)
+            if loss_name == "contrastive":
+                loss = criterion(desc_i, desc_j, psi)
+            elif loss_name == "multi_positive":
+                # Build pos_mask from in-batch positions
+                pos_r = batch["pos_r"].to(device)  # (B, 2)
+                pos_d = batch["pos_d"].to(device)  # (B, 2)
+                dists = torch.cdist(pos_r, pos_d)  # (B, B)
+                pos_mask = dists < 10.0  # positive if < 10m
+                loss = criterion(desc_i, desc_j, pos_mask)
+            elif loss_name in ("infonce", "ranking"):
+                loss = criterion(desc_i, desc_j)
+            else:
+                raise ValueError(f"Unknown Phase 1 loss: {loss_name}")
 
         optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        if use_amp:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
 
         total_loss += loss.item()
         n_batches += 1
@@ -307,6 +360,9 @@ def train_phase1_epoch(
 # -----------------------------------------------------------------
 # Phase 2: Triplet training epoch (NetVLAD + hard negative mining)
 # -----------------------------------------------------------------
+
+_cached_triplets = None  # module-level cache for mine_every_n
+
 
 def train_phase2_epoch(
     model: LC2Model,
@@ -319,8 +375,11 @@ def train_phase2_epoch(
     epoch: int,
     range_augmentation=None,
     depth_augmentation=None,
+    mine_every_n: int = 1,
+    scaler: Optional[torch.amp.GradScaler] = None,
 ) -> float:
     """Train one epoch with triplet loss and hard negative mining (Phase 2)."""
+    global _cached_triplets
     train_cfg = cfg["train"]
     input_cfg = cfg.get("input", {})
     batch_size = train_cfg.get("batch_size", 4)
@@ -328,18 +387,28 @@ def train_phase2_epoch(
     margin = train_cfg.get("margin", 0.1)
     camera_hfov_deg = input_cfg.get("camera_hfov_deg", None)
     effective_fov = camera_hfov_deg if camera_hfov_deg is not None else 360.0
+    forward_col_frac = input_cfg.get("forward_col_frac", 0.5)
+    use_amp = scaler is not None
 
-    # Mine hard triplets from current descriptors
-    print(f"[Epoch {epoch}] Mining hard triplets...")
-    t0 = time.time()
-    descriptors = miner.compute_descriptors(
-        model, transform, device,
-        batch_size=train_cfg.get("cache_batch_size", 64),
-        camera_hfov_deg=effective_fov,
-    )
-    triplets = miner.mine(descriptors, margin=margin)
-    t1 = time.time()
-    print(f"  Mined {len(triplets)} triplets ({t1 - t0:.1f}s)")
+    # Mine hard triplets every N epochs, reuse cached triplets otherwise
+    should_mine = (epoch % mine_every_n == 0) or (_cached_triplets is None)
+    if should_mine:
+        print(f"[Epoch {epoch}] Mining hard triplets...")
+        t0 = time.time()
+        descriptors = miner.compute_descriptors(
+            model, transform, device,
+            batch_size=train_cfg.get("cache_batch_size", 64),
+            camera_hfov_deg=effective_fov,
+            forward_col_frac=forward_col_frac,
+        )
+        triplets = miner.mine(descriptors, margin=margin)
+        t1 = time.time()
+        print(f"  Mined {len(triplets)} triplets ({t1 - t0:.1f}s)")
+        _cached_triplets = triplets
+    else:
+        triplets = _cached_triplets
+        print(f"[Epoch {epoch}] Reusing {len(triplets)} cached triplets "
+              f"(mine every {mine_every_n} epochs)")
 
     if len(triplets) == 0:
         print("  No triplets found. Skipping epoch.")
@@ -348,6 +417,7 @@ def train_phase2_epoch(
     triplet_dataset = LC2TripletDataset(
         triplets, miner.pool, transform,
         camera_hfov_deg=effective_fov,
+        forward_col_frac=forward_col_frac,
         range_augmentation=range_augmentation,
         depth_augmentation=depth_augmentation,
     )
@@ -365,21 +435,27 @@ def train_phase2_epoch(
         images_flat = images.view(B * T, C, H, W).to(device)
         is_range_flat = is_range.view(B * T).to(device)
 
-        desc = model(images_flat, is_range_flat)
-        desc = desc.view(B, T, -1)
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            desc = model(images_flat, is_range_flat)
+            desc = desc.view(B, T, -1)
 
-        q_desc = desc[:, 0]
-        p_desc = desc[:, 1]
-        n_desc = desc[:, 2:]
+            q_desc = desc[:, 0]
+            p_desc = desc[:, 1]
+            n_desc = desc[:, 2:]
 
-        loss = torch.tensor(0.0, device=device)
-        for n in range(n_neg):
-            loss = loss + criterion(q_desc, p_desc, n_desc[:, n])
-        loss = loss / n_neg
+            loss = torch.tensor(0.0, device=device)
+            for n in range(n_neg):
+                loss = loss + criterion(q_desc, p_desc, n_desc[:, n])
+            loss = loss / n_neg
 
         optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        if use_amp:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
 
         total_loss += loss.item()
         n_batches += 1
@@ -441,6 +517,8 @@ def main():
                         help="Skip Phase 1 contrastive pre-training")
     parser.add_argument("--gem_phase2", action="store_true",
                         help="Use GeM pooling for Phase 2 (skip NetVLAD)")
+    parser.add_argument("--mine_every_n", type=int, default=1,
+                        help="Re-mine hard triplets every N epochs (default: 1)")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--output_dir", type=str, default="checkpoints")
     args = parser.parse_args()
@@ -458,6 +536,7 @@ def main():
 
     num_clusters = model_cfg.get("num_clusters", 16)
     encoder_dim = model_cfg.get("encoder_dim", 512)
+    freeze_until = model_cfg.get("freeze_until", 24)
 
     resize_cfg = input_cfg.get("resize", None)
     input_size = tuple(resize_cfg) if resize_cfg else None
@@ -465,6 +544,9 @@ def main():
 
     # Config
     camera_hfov_deg = input_cfg.get("camera_hfov_deg", None)  # None = no FoV crop
+    forward_col_frac = input_cfg.get("forward_col_frac", 0.5)
+    range_is_camproj = input_cfg.get("range_is_camproj", False)
+    crop_px = input_cfg.get("crop_px", 0)
 
     # Build augmentation pipelines from config
     lidar_cfg = cfg.get("lidar", {})
@@ -490,9 +572,12 @@ def main():
     phase1_epochs = train_cfg.get("phase1_epochs", 20)
     phase1_lr = train_cfg.get("phase1_lr", 1e-3)
     contrastive_tau = train_cfg.get("contrastive_tau", 1.0)
+    phase1_loss_name = train_cfg.get("phase1_loss", "contrastive").lower()
+    phase1_temperature = train_cfg.get("phase1_temperature", 0.05)
     n_crops = train_cfg.get("n_crops", 8)
     crop_fov_deg = train_cfg.get("crop_fov_deg", 90.0)
     scale_augment_pct = train_cfg.get("scale_augment_pct", 20.0)
+    phase1_positive_mode = train_cfg.get("phase1_positive_mode", "all")
 
     # Phase 2 config
     phase2_frozen_epochs = train_cfg.get("phase2_frozen_epochs", 5)
@@ -501,6 +586,7 @@ def main():
     phase2_lr = train_cfg.get("phase2_lr", 1e-4)
 
     # ─── Model ───────────────────────────────────────────────────
+    resume_ckpt = None  # will hold checkpoint dict for optimizer/epoch restore
     if args.resume:
         resume_path = Path(args.resume)
         print(f"Loading encoder weights from: {resume_path}")
@@ -513,23 +599,37 @@ def main():
                   f"epoch={ckpt_probe['epoch']}, best={ckpt_probe.get('best_score', 0):.4f})")
             model = LC2Model(
                 num_clusters=num_clusters, encoder_dim=encoder_dim,
-                vladv2=False, pooling="gem",
+                vladv2=False, pooling="gem", freeze_until=freeze_until,
             )
             model.load_state_dict(ckpt_probe["state_dict"], strict=False)
             model = model.to(device)
+            resume_ckpt = ckpt_probe  # save for optimizer restore
         else:
-            # Original LC2 pretrained checkpoint
-            model = LC2Model.from_checkpoint(args.resume, device=device, pooling="gem")
+            # Original LC2 pretrained checkpoint — strip module. prefix and load
+            sd = ckpt_probe.get("state_dict", ckpt_probe)
+            sd = {k.replace('.module.', '.'): v for k, v in sd.items()}
+            model = LC2Model(
+                num_clusters=num_clusters, encoder_dim=encoder_dim,
+                vladv2=False, pooling="gem", freeze_until=freeze_until,
+            )
+            model.load_state_dict(sd, strict=False)
+            model = model.to(device)
+            print(f"  Loaded pretrained checkpoint (freeze_until={freeze_until})")
     else:
         model = LC2Model(
             num_clusters=num_clusters, encoder_dim=encoder_dim,
-            vladv2=False, pooling="gem",
+            vladv2=False, pooling="gem", freeze_until=freeze_until,
         )
         model = model.to(device)
 
     print(f"Model: {num_clusters} clusters, {encoder_dim}-dim")
     print(f"Total params: {sum(p.numel() for p in model.parameters()):,}")
     print(f"Preprocessing: always disparity, camera_hfov_deg={camera_hfov_deg}")
+
+    # AMP setup
+    use_amp = train_cfg.get("amp", False) and device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda") if use_amp else None
+    print(f"AMP (FP16): {'enabled' if use_amp else 'disabled'}")
 
     best_recall = 0.0
     total_epoch = 0
@@ -543,9 +643,15 @@ def main():
         print(f"\n{'='*60}")
         print(f"  PHASE 1: GeM + Contrastive (ψ-weighted)")
         print(f"  Epochs: {phase1_epochs}")
-        print(f"  Loss: LC2ContrastiveLoss, tau={contrastive_tau}")
+        if phase1_loss_name == "contrastive":
+            print(f"  Loss: LC2ContrastiveLoss, tau={contrastive_tau}")
+        elif phase1_loss_name in ("infonce", "ranking", "multi_positive"):
+            print(f"  Loss: BidirectionalInfoNCELoss, temperature={phase1_temperature}")
+        else:
+            raise ValueError(f"Unknown train.phase1_loss={phase1_loss_name!r}")
         print(f"  Range: {n_crops} FoV crops @ {crop_fov_deg}°")
         print(f"  Depth: disparity + scale augment ±{scale_augment_pct}%")
+        print(f"  Positive pairs: {phase1_positive_mode}")
         print(f"  LR: {phase1_lr}")
         print(f"{'='*60}\n")
 
@@ -558,6 +664,7 @@ def main():
                 sequences=train_cfg.get("sequences", dataset_cfg["sequences"]),
                 depth_cache_dir=dataset_cfg.get("depth_cache_dir"),
                 range_cache_dir=dataset_cfg.get("range_cache_dir"),
+                normal_cache_dir=dataset_cfg.get("normal_cache_dir"),
                 range_subsample=train_cfg.get("range_subsample", 10),
                 depth_subsample=train_cfg.get("depth_subsample", 10),
                 n_crops=n_crops,
@@ -572,9 +679,12 @@ def main():
                 range_cache_dir=dataset_cfg.get("range_cache_dir"),
                 range_subsample=train_cfg.get("range_subsample", 10),
                 depth_subsample=train_cfg.get("depth_subsample", 10),
-                n_crops=n_crops,
+                n_crops=1 if range_is_camproj else n_crops,
                 crop_fov_deg=crop_fov_deg,
                 camera_hfov_deg=camera_hfov_deg if camera_hfov_deg else 90.0,
+                range_is_camproj=range_is_camproj,
+                crop_px=crop_px,
+                spatial_radius=train_cfg.get("spatial_radius", 0.0),
             )
         n_range_p1 = sum(1 for r in phase1_pool.is_range if r)
         n_depth_p1 = len(phase1_pool) - n_range_p1
@@ -588,20 +698,55 @@ def main():
             pool=phase1_pool,
             max_range_m=50.0,
             camera_fov_deg=camera_hfov_deg if camera_hfov_deg else 90.0,
+            positive_mode=phase1_positive_mode,
         )
 
-        # Phase 1 dataset with scale augmentation
-        phase1_dataset = LC2ContrastivePairDataset(
-            pairs=pair_miner.pairs,
-            pool=phase1_pool,
-            transform=transform,
-            scale_augment=True,
-            max_scale_pct=scale_augment_pct,
-            n_crops=n_crops,
-            crop_fov_deg=crop_fov_deg,
-            range_augmentation=range_aug,
-            depth_augmentation=depth_aug,
-        )
+        # Build positive cross-modal pairs (range→depth, one-to-one)
+        from collections import defaultdict
+        pos_grouped = defaultdict(list)
+        for i, j, psi in pair_miner.pairs:
+            if psi <= 0:
+                continue
+            if phase1_pool.is_range[i] and not phase1_pool.is_range[j]:
+                r, d = i, j
+            elif phase1_pool.is_range[j] and not phase1_pool.is_range[i]:
+                r, d = j, i
+            else:
+                continue
+            pos_arr = phase1_pool.position_array()
+            dist = float(np.linalg.norm(pos_arr[r] - pos_arr[d]))
+            pos_grouped[r].append((d, dist, psi))
+
+        # One-to-one: pick closest depth per range
+        ranking_pairs = []
+        for r in sorted(pos_grouped):
+            d, dist, psi = sorted(pos_grouped[r], key=lambda x: x[1])[0]
+            ranking_pairs.append((int(r), int(d), float(psi)))
+
+        if phase1_loss_name in ("infonce", "ranking", "multi_positive"):
+            jitter_cols = train_cfg.get("jitter_cols", [0])
+            print(f"  Ranking: {len(ranking_pairs)} one-to-one cross-modal pairs")
+            print(f"  Jitter cols: {jitter_cols}")
+            from lc2.data.train_dataset import RankingPairDataset
+            phase1_dataset = RankingPairDataset(
+                pairs=ranking_pairs,
+                pool=phase1_pool,
+                transform=transform,
+                jitter_cols=jitter_cols,
+            )
+        else:
+            # Original contrastive: use all pairs
+            phase1_dataset = LC2ContrastivePairDataset(
+                pairs=pair_miner.pairs,
+                pool=phase1_pool,
+                transform=transform,
+                scale_augment=True,
+                max_scale_pct=scale_augment_pct,
+                n_crops=n_crops,
+                crop_fov_deg=crop_fov_deg,
+                range_augmentation=range_aug,
+                depth_augmentation=depth_aug,
+            )
 
         # Phase 1: unfreeze conv5 for training
         unfreeze_encoder_conv5(model)
@@ -610,7 +755,12 @@ def main():
             p.requires_grad = True
         print(f"  Trainable params (conv5 + GeM): {count_trainable(model):,}")
 
-        phase1_criterion = LC2ContrastiveLoss(tau=contrastive_tau)
+        if phase1_loss_name == "contrastive":
+            phase1_criterion = LC2ContrastiveLoss(tau=contrastive_tau)
+        elif phase1_loss_name == "multi_positive":
+            phase1_criterion = MultiPositiveInfoNCELoss(temperature=phase1_temperature)
+        else:
+            phase1_criterion = BidirectionalInfoNCELoss(temperature=phase1_temperature)
         optimizer = make_optimizer(model, optim_name, phase1_lr, momentum, weight_decay)
         scheduler = torch.optim.lr_scheduler.StepLR(
             optimizer, step_size=lr_step, gamma=lr_gamma,
@@ -624,6 +774,8 @@ def main():
                 optimizer, device,
                 batch_size=train_cfg.get("batch_size", 4),
                 epoch=total_epoch,
+                scaler=scaler,
+                loss_name=phase1_loss_name,
             )
             scheduler.step()
 
@@ -658,6 +810,12 @@ def main():
     elif args.skip_phase1:
         print("\nSkipping Phase 1 (--skip_phase1 flag).")
 
+    if phase2_frozen_epochs <= 0 and phase2_epochs <= 0:
+        print("\nPhase 2 disabled by config (phase2_frozen_epochs=0, phase2_epochs=0).")
+        print(f"Training complete. Best R@1: {best_recall*100:.2f}%")
+        print(f"Checkpoints saved to: {output_dir}")
+        return
+
     # ╔══════════════════════════════════════════════════════════════╗
     # ║  PHASE 2: Triplet Loss Fine-tuning (Section III.B.4)        ║
     # ╚══════════════════════════════════════════════════════════════╝
@@ -691,6 +849,7 @@ def main():
             sequences=train_cfg.get("sequences", dataset_cfg["sequences"]),
             depth_cache_dir=dataset_cfg.get("depth_cache_dir"),
             range_cache_dir=dataset_cfg.get("range_cache_dir"),
+            normal_cache_dir=dataset_cfg.get("normal_cache_dir"),
             range_subsample=train_cfg.get("range_subsample", 10),
             depth_subsample=train_cfg.get("depth_subsample", 10),
         )
@@ -711,6 +870,9 @@ def main():
             range_cache_dir=dataset_cfg.get("range_cache_dir"),
             range_subsample=train_cfg.get("range_subsample", 10),
             depth_subsample=train_cfg.get("depth_subsample", 10),
+            range_is_camproj=range_is_camproj,
+            crop_px=crop_px,
+            spatial_radius=train_cfg.get("spatial_radius", 0.0),
         )
     n_range = sum(1 for r in pool.is_range if r)
     n_depth = len(pool) - n_range
@@ -726,6 +888,7 @@ def main():
             num_clusters=num_clusters,
             batch_size=train_cfg.get("cache_batch_size", 64),
             camera_hfov_deg=camera_hfov_deg if camera_hfov_deg else 360.0,
+            forward_col_frac=forward_col_frac,
         )
         model = model.to(device)
 
@@ -746,8 +909,8 @@ def main():
     epochs_no_improve = 0
 
     # ─── Phase 2a: Frozen encoder, train NetVLAD only ────────────
-    # (Skip Phase 2a when using GeM — no new pooling layer to warm up)
-    if phase2_frozen_epochs > 0 and not use_gem_phase2:
+    # Skip Phase 2a when using GeM — no new pooling layer to warm up
+    if phase2_frozen_epochs > 0 and not args.gem_phase2:
         print(f"\n  Phase 2a: Frozen encoder, NetVLAD-only ({phase2_frozen_epochs} epochs)")
         freeze_encoder(model)
         print(f"  Trainable params (encoder frozen): {count_trainable(model):,}")
@@ -765,6 +928,8 @@ def main():
                 optimizer, device, cfg, total_epoch,
                 range_augmentation=range_aug,
                 depth_augmentation=depth_aug,
+                mine_every_n=args.mine_every_n,
+                scaler=scaler,
             )
             scheduler.step()
 
@@ -804,7 +969,16 @@ def main():
         optimizer, step_size=lr_step, gamma=lr_gamma,
     )
 
-    for epoch in range(phase2_epochs):
+    # Resume epoch/best_score if resuming from a Phase 2b checkpoint
+    # NOTE: optimizer and scheduler are always fresh — restoring them
+    # clobbers the configured LR (e.g. 0.0001 → 1e-6 from decayed state).
+    p2b_start_epoch = 0
+    if resume_ckpt is not None and resume_ckpt.get("phase") == "2b":
+        best_recall = resume_ckpt.get("best_score", 0.0)
+        print(f"  Resumed model weights (phase=2b), fresh optimizer lr={phase2_lr}"
+              f", best_recall={best_recall*100:.2f}%")
+
+    for epoch in range(p2b_start_epoch, phase2_epochs):
         t_epoch = time.time()
 
         avg_loss = train_phase2_epoch(
@@ -812,6 +986,8 @@ def main():
             optimizer, device, cfg, total_epoch,
             range_augmentation=range_aug,
             depth_augmentation=depth_aug,
+            mine_every_n=args.mine_every_n,
+            scaler=scaler,
         )
         scheduler.step()
 

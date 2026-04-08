@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 from lc2.encoder import DualEncoder
-from lc2.gem import GeM
+from lc2.gem import GeM, GAP
 from lc2.netvlad import NetVLAD
 from lc2.utils.checkpoint import load_lc2_checkpoint
 
@@ -42,6 +42,7 @@ class LC2Model(nn.Module):
         encoder_dim: int = 512,
         vladv2: bool = False,
         pooling: str = "netvlad",
+        freeze_until: int = 24,
     ) -> None:
         """
         Args:
@@ -49,15 +50,18 @@ class LC2Model(nn.Module):
             encoder_dim: Feature dimension from the encoder (512 for VGG16).
             vladv2: Whether to use VLADv2 formulation for NetVLAD.
             pooling: Initial pooling mode, ``"gem"`` or ``"netvlad"``.
+            freeze_until: Freeze encoder layers [0, freeze_until). 0=all trainable.
         """
         super().__init__()
-        self.encoder = DualEncoder()
+        self.encoder = DualEncoder(freeze_until=freeze_until)
         self.num_clusters = num_clusters
         self.encoder_dim = encoder_dim
         self.vladv2 = vladv2
 
-        # Create both pooling layers (only one is active at a time)
+        # Create all pooling layers (only one is active at a time)
         self.gem = GeM(p=3.0)
+        self.gem_signed = GeM(p=3.0, signed=True)
+        self.gap = GAP()
         self.netvlad = NetVLAD(
             num_clusters=num_clusters,
             dim=encoder_dim,
@@ -89,11 +93,17 @@ class LC2Model(nn.Module):
         if mode == "gem":
             self.pool = self.gem
             self.descriptor_dim = self.encoder_dim
+        elif mode == "gem_signed":
+            self.pool = self.gem_signed
+            self.descriptor_dim = self.encoder_dim
+        elif mode == "gap":
+            self.pool = self.gap
+            self.descriptor_dim = self.encoder_dim
         elif mode == "netvlad":
             self.pool = self.netvlad
             self.descriptor_dim = self.num_clusters * self.encoder_dim
         else:
-            raise ValueError(f"Unknown pooling mode: {mode}. Use 'gem' or 'netvlad'.")
+            raise ValueError(f"Unknown pooling mode: {mode}. Use 'gem', 'gem_signed', 'gap', or 'netvlad'.")
         self._pooling_mode = mode
 
     @property

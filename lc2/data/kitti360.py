@@ -50,6 +50,7 @@ class KITTI360LC2Dataset(Dataset):
         modality: str,
         depth_cache_dir: Optional[str] = None,
         range_cache_dir: Optional[str] = None,
+        normal_cache_dir: Optional[str] = None,
         input_size: Optional[Tuple[int, int]] = None,
         subsample: int = 1,
         camera_hfov_deg: Optional[float] = None,
@@ -58,9 +59,10 @@ class KITTI360LC2Dataset(Dataset):
         Args:
             root: KITTI-360 root directory.
             sequences: List of short sequence IDs (e.g., ``["0000", "0002"]``).
-            modality: Either ``"depth"`` or ``"range"``.
+            modality: ``"depth"``, ``"range"``, or ``"normal"``.
             depth_cache_dir: Directory with pre-computed depth ``.npy`` files.
             range_cache_dir: Directory with pre-computed range ``.npy`` files.
+            normal_cache_dir: Directory with pre-computed normal map ``.npy`` files.
             input_size: If provided, resize to (H, W). If None, keep native resolution.
             subsample: Load every N-th frame.
             camera_hfov_deg: If set, crop panoramic range images to this FoV.
@@ -75,8 +77,15 @@ class KITTI360LC2Dataset(Dataset):
             raise ValueError("depth_cache_dir required for 'depth' modality")
         if modality == "range" and range_cache_dir is None:
             raise ValueError("range_cache_dir required for 'range' modality")
+        if modality == "normal" and normal_cache_dir is None:
+            raise ValueError("normal_cache_dir required for 'normal' modality")
 
-        cache_dir = Path(depth_cache_dir) if modality == "depth" else Path(range_cache_dir)
+        if modality == "normal":
+            cache_dir = Path(normal_cache_dir)
+        elif modality == "depth":
+            cache_dir = Path(depth_cache_dir)
+        else:
+            cache_dir = Path(range_cache_dir)
 
         # Build sample list across all sequences
         self.samples: List[Tuple[Path, str, int]] = []  # (npy_path, seq_id, frame_id)
@@ -98,7 +107,14 @@ class KITTI360LC2Dataset(Dataset):
             if not seq_cache.exists():
                 continue
 
-            npy_files = {int(p.stem): p for p in seq_cache.glob("*.npy")}
+            if modality == "normal":
+                npy_files = {}
+                for p in seq_cache.glob("*_normal.npy"):
+                    fid = int(p.stem.replace("_normal", ""))
+                    npy_files[fid] = p
+            else:
+                npy_files = {int(p.stem): p for p in seq_cache.glob("*.npy")
+                             if "_normal" not in p.stem and "_depth" not in p.stem}
 
             # Intersect with available poses
             common_frames = sorted(set(poses.keys()) & set(npy_files.keys()))
@@ -149,23 +165,25 @@ class KITTI360LC2Dataset(Dataset):
         npy_path, seq_id, frame_id = self.samples[idx]
         data = np.load(str(npy_path))
 
-        # Ensure 2D single-channel
-        if data.ndim > 2:
-            data = squeeze_depth(data)
-
-        if self.modality == "range":
-            if self.camera_hfov_deg is not None:
-                data = crop_range_to_camera_fov(data, camera_hfov_deg=self.camera_hfov_deg)
-            data = normalize_disparity(data)
-        elif self.modality == "depth":
-            data = depth_to_normalized_disparity(data)
+        if self.modality == "normal":
+            from lc2.data.transforms import normalize_normal_map
+            data = normalize_normal_map(data)  # (H,W,3) [0,1]
+        else:
+            if data.ndim > 2:
+                data = squeeze_depth(data)
+            if self.modality == "range":
+                if self.camera_hfov_deg is not None:
+                    data = crop_range_to_camera_fov(data, camera_hfov_deg=self.camera_hfov_deg)
+                data = range_to_normalized_disparity(data)
+            elif self.modality == "depth":
+                data = depth_to_normalized_disparity(data)
 
         image = self.transform(data)
         position = torch.from_numpy(self._positions_array[idx].copy()).float()
 
         return {
             "image": image,
-            "is_range": self.modality == "range",
+            "is_range": self.modality in ("range", "normal"),
             "position": position,
             "seq": seq_id,
             "frame_id": frame_id,

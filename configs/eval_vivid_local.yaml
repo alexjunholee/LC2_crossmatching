@@ -1,0 +1,24 @@
+dataset:
+  name: vivid
+  root: /media/jhlee/EVO4TB/vivid_projects/data
+  sequences: ["campus_day1", "campus_day2", "city_day1"]
+  depth_cache_dir: /home/jhlee/ws_xloc/external/LC2_crossmatching/cache/depth/vivid
+  range_cache_dir: /home/jhlee/ws_xloc/external/LC2_crossmatching/cache/range/vivid
+  pos_threshold: 25.0
+
+model:
+  num_clusters: 16
+  encoder_dim: 512
+
+val:
+  sequences: ["campus_day2"]
+  batch_size: 48
+  recall_ks: [1, 5, 10]
+  top_k: 10
+  subsample: 10
+
+input:
+  resize: [480, 640]
+  range_is_camproj: false
+  camera_hfov_deg: 85.9
+  forward_col_frac: 0.996

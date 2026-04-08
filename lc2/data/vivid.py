@@ -81,6 +81,9 @@ class VIVIDLC2Dataset(Dataset):
         input_size: Optional[Tuple[int, int]] = None,
         subsample: int = 1,
         camera_hfov_deg: Optional[float] = None,
+        forward_col_frac: float = 0.5,
+        range_is_camproj: bool = False,
+        crop_px: int = 0,
     ) -> None:
         """
         Args:
@@ -95,6 +98,8 @@ class VIVIDLC2Dataset(Dataset):
                 resolution (original LC2 does not resize).
             subsample: Load every N-th frame (for faster evaluation).
             camera_hfov_deg: If set, crop range images to this FoV (paper III.B.4).
+            forward_col_frac: Fraction of panoramic W corresponding to camera
+                forward direction. VIVID Ouster: 0.996, KITTI Velodyne: 0.5.
         """
         super().__init__()
         self.root = Path(root)
@@ -104,6 +109,9 @@ class VIVIDLC2Dataset(Dataset):
         self.range_cache_dir = Path(range_cache_dir) if range_cache_dir else None
         self.transform = get_transform(input_size)
         self.camera_hfov_deg = camera_hfov_deg
+        self.forward_col_frac = forward_col_frac
+        self.range_is_camproj = range_is_camproj
+        self.crop_px = crop_px
 
         seq_dir = self.root / sequence
 
@@ -219,11 +227,22 @@ class VIVIDLC2Dataset(Dataset):
             data = squeeze_depth(data)
 
         if self.modality == "depth":
+            if self.crop_px > 0:
+                data = data[self.crop_px:-self.crop_px, self.crop_px:-self.crop_px]
             data = depth_to_normalized_disparity(data)
         elif self.modality == "range":
-            if self.camera_hfov_deg is not None:
-                data = crop_range_to_camera_fov(data, camera_hfov_deg=self.camera_hfov_deg)
-            data = normalize_disparity(data)
+            if self.range_is_camproj:
+                # Camera-projected LiDAR depth: same preprocessing as depth
+                data = depth_to_normalized_disparity(data)
+            else:
+                if self.camera_hfov_deg is not None:
+                    data = crop_range_to_camera_fov(
+                        data, camera_hfov_deg=self.camera_hfov_deg,
+                        forward_col_frac=self.forward_col_frac,
+                    )
+                # Convert range to disparity (1/range) then normalize to [0,1]
+                # so range and depth share the same disparity representation.
+                data = range_to_normalized_disparity(data)
 
         image = self.transform(data)
         position = torch.from_numpy(self.positions[idx].copy()).float()

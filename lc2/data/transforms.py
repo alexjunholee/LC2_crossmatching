@@ -22,6 +22,15 @@ LC2_MEAN = [0.5, 0.5, 0.5]
 LC2_STD = [0.5, 0.5, 0.5]
 
 
+def normalize_normal_map(normal: np.ndarray) -> np.ndarray:
+    """Convert normal map from [-1,1] to [0,1] float32 (H,W,3).
+
+    Invalid pixels (all zeros) stay zero.
+    """
+    normal = np.asarray(normal, dtype=np.float32)
+    return np.clip((normal + 1.0) / 2.0, 0, 1)
+
+
 def _repeat_channels(x: torch.Tensor) -> torch.Tensor:
     """Replicate single-channel tensor to 3 channels."""
     if x.shape[0] == 1:

@@ -51,6 +51,7 @@ def build_datasets(cfg, seq):
     """Build range and depth datasets for a given sequence."""
     dataset_cfg = cfg["dataset"]
     input_cfg = cfg.get("input", {})
+    val_cfg = cfg.get("val", cfg.get("eval", {}))
     dataset_name = dataset_cfg.get("name", "vivid")
 
     resize_cfg = input_cfg.get("resize", None)
@@ -85,18 +86,21 @@ def build_datasets(cfg, seq):
             subsample=10, input_size=input_size,
         )
     else:
+        forward_col_frac = input_cfg.get("forward_col_frac", 0.5)
+        val_subsample = val_cfg.get("subsample", 10)
         ds_range = VIVIDLC2Dataset(
             root=dataset_cfg["root"], sequence=seq,
-            modality="range", subsample=10,
+            modality="range", subsample=val_subsample,
             range_cache_dir=dataset_cfg.get("range_cache_dir"),
             input_size=input_size,
             camera_hfov_deg=camera_hfov_deg,
+            forward_col_frac=forward_col_frac,
         )
         ds_depth = VIVIDLC2Dataset(
             root=dataset_cfg["root"], sequence=seq,
             modality="depth",
             depth_cache_dir=dataset_cfg.get("depth_cache_dir"),
-            subsample=10, input_size=input_size,
+            subsample=val_subsample, input_size=input_size,
         )
 
     return ds_range, ds_depth
@@ -125,11 +129,16 @@ def main():
 
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     state = ckpt.get("model_state_dict", ckpt.get("state_dict", ckpt))
+    # Strip DataParallel module. prefix if present
+    state = {k.replace('.module.', '.'): v for k, v in state.items()}
     model.load_state_dict(state, strict=False)
 
     # Detect pooling mode from checkpoint or args
     if args.gem:
         model.set_pooling("gem")
+    elif isinstance(ckpt, dict) and ckpt.get("phase") in (1, "1", "1+vlad_init"):
+        model.set_pooling("gem")
+        print("  Auto-detected Phase 1 checkpoint → GeM pooling")
     elif "gem" in str(ckpt.get("config", {}).get("train", {})):
         model.set_pooling("gem")
     print(f"  Pooling mode: {model.pooling_mode}")
